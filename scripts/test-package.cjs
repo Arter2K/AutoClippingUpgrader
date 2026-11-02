@@ -71,6 +71,12 @@ async function inspectExecutable(executable, label, artifacts, workerAsset, vers
     await cdp.evaluate(`(()=>{const el=document.querySelector('input[aria-label="Clip Volume"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,'0.4');el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
     await cdp.evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Detach Audio').click()`);
     await waitFor('document.querySelectorAll(".nle-track.audio .nle-clip").length===1 && !!document.querySelector(".nle-track.audio .waveform path")');
+    await cdp.evaluate(`(()=>{const ruler=document.querySelector('.nle-ruler > div'),r=ruler.getBoundingClientRect();ruler.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,clientX:r.x+15,clientY:r.y+10}));})()`);
+    await cdp.evaluate(`document.querySelector('.nle-track[data-track-id="track-main"] .nle-clip').click()`);
+    await cdp.evaluate(`document.querySelector('button[aria-label="Enable Chroma Key"]').click()`);
+    await waitFor('!!document.querySelector(".bcc-controls")');
+    await cdp.evaluate(`(()=>{const el=document.querySelector('select[aria-label="View Mode"]');el.value='alpha_matte';el.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await waitFor(`(()=>{const c=document.querySelector('[data-testid="preview-canvas"]'),ctx=c.getContext('2d');const samples=[.2,.35,.5,.65,.8].map(x=>Array.from(ctx.getImageData(Math.round(c.width*x),Math.round(c.height*.52),1,1).data));return samples.every(p=>Math.abs(p[0]-p[1])<3&&Math.abs(p[1]-p[2])<3)&&samples.some(p=>p[0]>200)})()`);
     await cdp.evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='FFmpeg-кадр').click()`);
     await waitFor('!!document.querySelector(".reference-frame img")', 60000);
     assert.equal(await cdp.evaluate('document.querySelectorAll(".toast.error").length'), 0);
@@ -97,10 +103,11 @@ async function inspectExecutable(executable, label, artifacts, workerAsset, vers
     const draft = JSON.parse(await readFile(path.join(data, 'editor', 'draft.json'), 'utf8'));
     assert.equal(draft.template.canvas.width, 1080);
     assert.equal(draft.template.timeline.tracks.find(track => track.id === 'track-main').clips.length, 2);
+    assert.equal(draft.template.timeline.tracks.find(track => track.id === 'track-main').clips[0].background_removal.mode,'bcc_chromakey_studio');
     const audio = draft.template.timeline.tracks.find(track => track.type === 'audio');
     assert.equal(audio.clips[0].volume, .4);
     assert.equal(draft.template.timeline.total_duration_sec, 8);
-    console.log(`PASS: ${label} EXE v${version}, multitrack split/gain/detach/waveform/draft, bundled FFmpeg, reference frame, offline AI, clean close`);
+    console.log(`PASS: ${label} EXE v${version}, main BCC/WebGL matte, multitrack split/gain/detach/waveform/draft, bundled FFmpeg, reference frame, offline AI, clean close`);
     return { label, passed: true, executable: path.basename(executable) };
   } finally {
     socket?.close(); if (child && child.exitCode === null) { child.kill(); await pause(800); }

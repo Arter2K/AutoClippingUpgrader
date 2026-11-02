@@ -9,6 +9,7 @@ import { drawRichText, transformedBounds } from '../../lib/rich-text-canvas';
 import { bccSettings, chromaSettings, effectiveScale, resolvedTextStyle } from '../../../shared/layer-effects';
 import { averagePixelColor } from '../../../shared/bcc-chroma';
 import { BccLayerRenderer } from '../../lib/bcc-layer-renderer';
+import { useTimelineStore } from '../../stores/timeline-store';
 import { applyChromaKey } from '../../lib/chroma-key';
 import { TimelinePreview, advanceTimeline } from '../../lib/timeline-preview';
 
@@ -24,7 +25,7 @@ export function PreviewCanvas() {
   const keyedCanvases = useRef(new Map<string, HTMLCanvasElement>());
   const bccRenderers = useRef(new Map<string, BccLayerRenderer>());
   useEffect(() => {
-    for (const [id, renderer] of bccRenderers.current) if (!template.overlays.some(o => o.id === id)) { renderer.dispose(); bccRenderers.current.delete(id); }
+    for (const [id, renderer] of bccRenderers.current) if (id !== 'main' && !template.overlays.some(o => o.id === id)) { renderer.dispose(); bccRenderers.current.delete(id); }
   }, [template.overlays]);
   useEffect(() => () => { for (const renderer of bccRenderers.current.values()) renderer.dispose(); }, []);
   const timelinePreview = useRef<TimelinePreview | null>(null);
@@ -108,13 +109,17 @@ export function PreviewCanvas() {
           if (v.currentTime >= state.trim.outSec - 0.01) { v.currentTime = state.trim.inSec; }
           if (now - lastTime > 33) { useEditorStore.setState({ playhead: v.currentTime }); lastTime = now; }
         }
-        if (t.main_clip_layout.source_aspect_handling === 'blur_pad' && t.main_clip_layout.background_blur.enabled) {
+        const mainKey=t.main_clip_layout.background_removal;
+        if (!mainKey?.enabled && t.main_clip_layout.source_aspect_handling === 'blur_pad' && t.main_clip_layout.background_blur.enabled) {
           const sw = v.videoWidth, sh = v.videoHeight, r = Math.max(w / sw, h / sh), cw = w / r, ch = h / r;
           ctx.save(); ctx.filter = `blur(${t.main_clip_layout.background_blur.luma_radius * pixelWidth / w}px) brightness(${Math.max(0, 1 + t.main_clip_layout.background_blur.brightness)})`;
           ctx.drawImage(v, (sw - cw) / 2, (sh - ch) / 2, cw, ch, -12, -12, w + 24, h + 24); ctx.restore();
         }
         const g = mainGeometry(t, v.videoWidth, v.videoHeight), s = g.source, d = g.target;
-        try { ctx.drawImage(v, s.x, s.y, s.width, s.height, d.x, d.y, d.width, d.height); } catch { /* Wait for decoded media. */ }
+        try {
+          if(mainKey?.enabled){let renderer=bccRenderers.current.get('main');if(!renderer){renderer=new BccLayerRenderer();bccRenderers.current.set('main',renderer);}renderer.drawCropped(ctx,v,mainKey,g,state.pickingColorFor==='main');}
+          else ctx.drawImage(v, s.x, s.y, s.width, s.height, d.x, d.y, d.width, d.height);
+        } catch { /* Wait for decoded media. */ }
       }
       if (!t.timeline) boxes.current.set('main', { ...t.main_clip_layout.Position });
       const relative = state.playhead - state.trim.inSec, duration = state.trim.outSec - state.trim.inSec;
@@ -196,7 +201,7 @@ export function PreviewCanvas() {
     const ids = [...s.template.overlays].filter(o => o.enabled !== false && overlayAlpha(o, s.playhead - s.trim.inSec, s.trim.outSec - s.trim.inSec) > 0)
       .sort((a, b) => b.z_index - a.z_index).map(o => o.id).concat('main');
     const id = resize ? s.selectedId : ids.find(id => { const b = boxes.current.get(id); return b && p.x >= b.x && p.x <= b.x + b.width && p.y >= b.y && p.y <= b.y + b.height; });
-    if (!id) return; s.select(id);
+    if (!id) return; useTimelineStore.getState().selectClip(null); s.select(id);
     const o = s.template.overlays.find(o => o.id === id); if (o?.locked) return;
     const pos = o?.position ?? s.template.main_clip_layout.Position, box = boxes.current.get(id)!;
     drag.current = { id, startX: p.x, startY: p.y, positionX: pos.x, positionY: pos.y, box: { ...box },

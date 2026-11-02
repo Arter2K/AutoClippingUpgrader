@@ -2,7 +2,7 @@
   "name": "auto-clipping-upgrader",
   "productName": "AutoClippingUpgrader",
   "description": "Vertical video editor with template compositing, FFmpeg rendering and publishing integrations",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.cjs",

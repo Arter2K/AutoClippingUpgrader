@@ -104,7 +104,7 @@ export function App() {
       </div>
     </header>
     <div className={`workspace ${initialized ? '' : 'booting'}`}>
-      <aside className="left-sidebar"><div className="sidebar-title"><span>PROJECT STUDIO</span><span className="version-pill">v0.6.0</span></div><TemplatePanel onJson={openJson} /><LayerPanel /></aside>
+      <aside className="left-sidebar"><div className="sidebar-title"><span>PROJECT STUDIO</span><span className="version-pill">v0.6.1</span></div><TemplatePanel onJson={openJson} /><LayerPanel /></aside>
       <main className={`editor-center ${dragging ? 'is-dragging' : ''}`} onDragOver={event => { event.preventDefault(); if (event.dataTransfer.types.includes('Files')) setDragging(true); }}
         onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false); }} onDrop={event => {
           event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) void loadSource(() => window.desktop.editor.dropSource(file));

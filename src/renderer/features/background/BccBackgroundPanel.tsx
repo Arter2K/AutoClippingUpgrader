@@ -5,14 +5,16 @@ import { useEditorStore, task } from '../../stores/editor-store';
 import { chromaSettings, type MediaOverlay } from '../../../shared/layer-effects';
 import { newBccChroma, type BccChromaConfig } from '../../../shared/bcc-chroma';
 
-export function BackgroundPanel({ layer }: { layer: MediaOverlay }) {
+export function BackgroundPanel({ layer, onConfig }: { layer: MediaOverlay; onConfig?: (config: BccChromaConfig, record: boolean) => void }) {
   const legacy = chromaSettings(layer), bg = layer.background_removal;
   const config = bg?.mode === 'bcc_chromakey_studio' ? bg : newBccChroma();
   const enabled = bg?.mode === 'bcc_chromakey_studio' ? bg.enabled : !!legacy;
   const ai = useEditorStore(s => s.aiTasks[layer.id]);
-  const update = (recipe: (value: BccChromaConfig) => void, record = true) => useEditorStore.getState().updateOverlay(layer.id, o => {
-    if (o.type === 'text') return; const next = structuredClone(config); recipe(next); o.background_removal = next; delete o.chroma_key;
-  }, record);
+  const update = (recipe: (value: BccChromaConfig) => void, record = true) => {
+    const next = structuredClone(config); recipe(next);
+    if (onConfig) onConfig(next,record);
+    else useEditorStore.getState().updateOverlay(layer.id,o => { if(o.type !== 'text') {o.background_removal=next;delete o.chroma_key;} },record);
+  };
   const range = (label: string, value: number, min: number, max: number, step: number, change: (c: BccChromaConfig, value: number) => void) =>
     <label className="field-label bcc-slider">{label}<span>{Number(value.toFixed(2))}</span><input aria-label={label} type="range" min={min} max={max} step={step} value={value}
       onPointerDown={() => useEditorStore.getState().checkpoint()} onKeyDown={() => useEditorStore.getState().checkpoint()}
@@ -46,11 +48,13 @@ export function BackgroundPanel({ layer }: { layer: MediaOverlay }) {
       </Section>
       <Section title="Spill Suppression">
         <Toggle label="Enable Despill" checked={s.enabled} onChange={v => update(c => { c.spill_suppression.enabled = v; })} />
+        <Toggle label="Despill: только края" checked={s.edges_only} onChange={v => update(c => { c.spill_suppression.edges_only = v; })} />
         {range('Spill Strength (%)', s.strength * 100, 0, 100, 1, (c,v) => { c.spill_suppression.strength = v / 100; })}
         {range('Despill Balance', s.balance, 0, 1, .01, (c,v) => { c.spill_suppression.balance = v; })}
         <Toggle label="Restore Luminance" checked={s.restore_luminance} onChange={v => update(c => { c.spill_suppression.restore_luminance = v; })} />
       </Section>
       <Section title="Light Wrap">
+        <p className="field-note">Подмешивает цвет нижнего фона по краям. Для исходного оттенка оставьте выключенным.</p>
         <Toggle label="Enable Light Wrap" checked={w.enabled} onChange={v => update(c => { c.light_wrap.enabled = v; })} />
         {range('Light Wrap Intensity (%)', w.intensity * 100, 0, 100, 1, (c,v) => { c.light_wrap.intensity = v / 100; })}
         {range('Light Wrap Width (px)', w.width_px, 1, 30, .5, (c,v) => { c.light_wrap.width_px = v; })}

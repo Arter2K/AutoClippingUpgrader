@@ -2,7 +2,7 @@
 
 Electron + React + TypeScript приложение для вертикального монтажа: многодорожечный таймлайн, нарезка и тримминг сегментов, отделение аудио, микшер, JSON-шаблоны, BCC-style Chroma Key Studio, локальное AI-удаление фона и FFmpeg-рендер. Готовое видео передаётся в панель публикации TikTok / Google Drive; Drive при выбранной опции загружается после рендера.
 
-**Текущая версия: 0.6.0.** Локальная Windows-сборка создаёт `release/AutoClippingUpgrader-0.6.0-Setup-x64.exe` и `release/AutoClippingUpgrader-0.6.0-Portable-x64.exe` со встроенными FFmpeg/FFprobe и AI-моделью. Готовые EXE, модели, `node_modules` и тестовые артефакты не хранятся в Git. [Инструкция EXE и повторная сборка](docs/windows-build.md).
+**Текущая версия: 0.6.1.** Локальная Windows-сборка создаёт `release/AutoClippingUpgrader-0.6.1-Setup-x64.exe` и `release/AutoClippingUpgrader-0.6.1-Portable-x64.exe` со встроенными FFmpeg/FFprobe и AI-моделью. Готовые EXE, модели, `node_modules` и тестовые артефакты не хранятся в Git. [Инструкция EXE и повторная сборка](docs/windows-build.md).
 
 **Запуск из исходников:** после установки зависимостей и сборки откройте `Start.cmd` либо выполните `.\scripts\run.ps1 preview`. Для разработки используйте `npm run dev`. [Руководство редактора](docs/editor.md) содержит описание функций, горячих клавиш и проверки; артефакты локальных проверок создаются в `out/`.
 

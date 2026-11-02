@@ -51,7 +51,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     let target = t.tracks.find(track => track.type === 'audio' && !track.is_locked && !track.is_muted && track.is_solo === from!.is_solo && track.volume === from!.volume && !track.clips.some(c => c.timeline_start_sec < clip.timeline_start_sec + clip.duration_sec && c.timeline_start_sec + c.duration_sec > clip.timeline_start_sec));
     if (!target) { target = newTrack('audio', t.tracks, crypto.randomUUID()); target.volume = from!.volume; target.is_solo = from!.is_solo; t.tracks.push(target); }
     target.clips.push({ ...clip, id: crypto.randomUUID(), overlay_id: undefined, media_type: 'audio', use_template_main_layout: false,
-      volume: clip.volume, muted: false, name: `${clip.name} · audio` });
+      background_removal: undefined, volume: clip.volume, muted: false, name: `${clip.name} · audio` });
     clip.muted = true;
   }); },
   deleteClip(id) { edit(t => { for (const track of t.tracks) if (!track.is_locked) track.clips = track.clips.filter(c => c.id !== id); }); set({ selectedClipId: null }); },

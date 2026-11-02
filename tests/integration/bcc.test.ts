@@ -9,6 +9,8 @@ import { newBccChroma, bccDespill } from '../../src/shared/bcc-chroma';
 import { newTemplate } from '../../src/shared/defaults';
 import { migrateTimeline } from '../../src/shared/timeline-migration';
 import { renderPreview } from '../../src/main/engine/preview';
+import { newTrack } from '../../src/shared/timeline-migration';
+import { splitSegment } from '../../src/shared/timeline';
 
 const ffmpeg=process.env.FFMPEG_PATH??'ffmpeg';
 test('real BCC matte: source alpha, fractional erosion/dilation, gamma, weighted primary and green/blue despill', {timeout:60000}, async()=>{
@@ -34,7 +36,7 @@ test('real BCC matte: source alpha, fractional erosion/dilation, gamma, weighted
     c.matte_cleanup.matte_choke_px=0;c.matte_cleanup.matte_softness_px=1.5;out=await render(c,shape); assert.ok(pixel(out,15)[3]!>0&&pixel(out,15)[3]!<255);
     const soft=pixel(out,15)[3]!;c.matte_cleanup.matte_gamma=2; assert.ok(pixel(await render(c,shape),15)[3]!>soft);
     for(const key of ['#00FF00','#0000FF']){
-      c.primary_key.key_color=key;c.matte_cleanup.matte_softness_px=0;c.spill_suppression.strength=.85;
+      c.primary_key.key_color=key;c.matte_cleanup.matte_softness_px=0;c.spill_suppression.strength=.85;c.spill_suppression.edges_only=false;
       const rgba=path.join(dir,'spill.rgba'), rgb=key==='#00FF00'?[100,180,60]:[100,60,180], data=Buffer.alloc(64*64*4);
       for(let i=0;i<data.length;i+=4)data.set([...rgb,255],i); await writeFile(rgba,data);
       const actual=pixel(await render(c,rgba),24), expected=bccDespill(rgb.map(v=>v/255),c).map(v=>v*255);
@@ -43,6 +45,32 @@ test('real BCC matte: source alpha, fractional erosion/dilation, gamma, weighted
     c.primary_key.hue_weight=0;c.primary_key.saturation_weight=0;c.primary_key.luma_weight=0; assert.equal(pixel(await render(c,shape),24)[3],0);
     c.primary_key.hue_weight=1;c.primary_key.saturation_weight=1;c.primary_key.luma_weight=0;c.primary_key.key_color='#00FF00';assert.equal(pixel(await render(c,shape),8)[3],0);
   } finally {await rm(dir,{recursive:true,force:true});}
+});
+
+test('main video BCC opens lower tracks, preserves foreground RGB, disables self blur and supports split overrides', {timeout:60000},async()=>{
+  const dir=await mkdtemp(path.join(tmpdir(),'acu-main-bcc-'));
+  try{
+    const rgba=path.join(dir,'input.rgba'),image=path.join(dir,'input.png'),source=path.join(dir,'source.mkv'),lower=path.join(dir,'lower.mp4');
+    const bytes=Buffer.alloc(64*64*4);for(let y=0;y<64;y++)for(let x=0;x<64;x++)bytes.set(x>=16&&x<48&&y>=16&&y<48?[240,190,80,255]:[0,255,0,255],(y*64+x)*4);await writeFile(rgba,bytes);
+    await runProcess(ffmpeg,['-v','error','-f','rawvideo','-pixel_format','rgba','-video_size','64x64','-i',rgba,'-frames:v','1',image]);
+    await runProcess(ffmpeg,['-v','error','-loop','1','-i',image,'-t','1','-r','30','-c:v','ffv1','-pix_fmt','bgr0',source]);
+    await runProcess(ffmpeg,['-v','error','-f','lavfi','-i','color=blue:s=64x64:r=30:d=1','-c:v','libx264',lower]);
+    const t=newTemplate();Object.assign(t.canvas,{width:64,height:64,fps:30,background_color:'#0000FF'});
+    Object.assign(t.main_clip_layout,{source_aspect_handling:'blur_pad',Position:{x:0,y:0,width:64,height:64,scale_mode:'contain'},background_removal:newBccChroma()});
+    t.main_clip_layout.background_blur.enabled=true;t.main_clip_layout.background_blur.scale_height=64;
+    let serial=0;const frame=async(time=.25)=>{const png=path.join(dir,`f${serial}.png`),raw=path.join(dir,`f${serial++}.rgb`);await renderPreview(source,t,{inSec:0,outSec:1},time,png);await runProcess(ffmpeg,['-v','error','-i',png,'-pix_fmt','rgb24','-f','rawvideo',raw]);return {data:await readFile(raw),png};};
+    const p=(data:Buffer,x:number)=>[...data.subarray((32*64+x)*3,(32*64+x)*3+3)];
+    let result=await frame();assert.ok(p(result.data,8)[2]!>235,`Main key did not reveal canvas: ${p(result.data,8)}`);
+    [240,190,80].forEach((v,i)=>assert.ok(Math.abs(p(result.data,32)[i]!-v)<6,`Main colour drift ${p(result.data,32)}`));
+    t.canvas.background_color='#FF0000';t.timeline=migrateTimeline(t,{id:'source',name:'source',path:source,url:'',thumbnails:[],media:{width:64,height:64,durationSec:1,hasAudio:false}},{inSec:0,outSec:1});
+    const bottom=newTrack('video',[],'lower');bottom.order_index=0;bottom.clips=[{...t.timeline.tracks[0]!.clips[0]!,id:'lower-clip',source_path:lower,use_template_main_layout:false}];t.timeline.tracks.unshift(bottom);
+    result=await frame();assert.ok(p(result.data,8)[2]!>235&&p(result.data,8)[0]!<15,`Main did not reveal lower video: ${p(result.data,8)}`);
+    [240,190,80].forEach((v,i)=>assert.ok(Math.abs(p(result.data,32)[i]!-v)<6,`Timeline colour drift ${p(result.data,32)}`));
+    const main=t.timeline.tracks.find(track=>track.id==='track-main')!,parts=splitSegment(main.clips[0]!,.5,'right')!;main.clips=parts;
+    parts[1].background_removal={...newBccChroma(),enabled:false};
+    assert.ok(p((await frame(.25)).data,8)[2]!>235);assert.ok(p((await frame(.75)).data,8)[1]!>235,'Disabled segment must show original green');
+    const artifacts=path.resolve('out/bcc-qa');await mkdir(artifacts,{recursive:true});await copyFile(result.png,path.join(artifacts,'main-key-colour-preserved.png'));
+  }finally{await rm(dir,{recursive:true,force:true});}
 });
 
 test('real BCC light wrap uses the lower video in legacy and multitrack exports', {timeout:60000},async()=>{

@@ -1,5 +1,5 @@
-import { morphologyPasses, rgbToYcbcr, keyRgb, type BccChromaConfig } from '../../shared/bcc-chroma';
-import { chromaFilter, spillType } from '../../shared/layer-effects';
+import { bccSpillChannel, morphologyPasses, rgbToYcbcr, keyRgb, type BccChromaConfig } from '../../shared/bcc-chroma';
+import { chromaFilter } from '../../shared/layer-effects';
 
 const n = (v: number) => String(Number(v.toFixed(8)));
 export function layerAlphaFilters(opacity: number, start: number, end: number, fadeIn: number, fadeOut: number): string {
@@ -12,6 +12,21 @@ export function weightedAlphaExpression(c: BccChromaConfig): string {
   const u = '(-.169*r(X,Y)-.331*g(X,Y)+.5*b(X,Y))/255';
   const v = '(.5*r(X,Y)-.419*g(X,Y)-.081*b(X,Y))/255';
   return `255*clip((sqrt(pow((${u}-(${n(k[1])}))*${n(p.hue_weight)},2)+pow((${v}-(${n(k[2])}))*${n(p.saturation_weight)},2)+pow((${y}-(${n(k[0])}))*${n(p.luma_weight)},2))-${n(p.similarity)})/.25,0,1)`;
+}
+export function despillColorExpressions(c: BccChromaConfig): string[] {
+  const s = c.spill_suppression, channel = bccSpillChannel(c.primary_key.key_color);
+  const colors = ['(r(X,Y)/255)', '(g(X,Y)/255)', '(b(X,Y)/255)'];
+  if (!channel || !s.enabled || s.strength === 0) return colors.map(v => `255*${v}`);
+  const [r,g,b] = colors as [string,string,string], blue = channel === 'blue', other = blue ? g : b;
+  const high = `max(${r},${other})`;
+  const limit = s.balance <= .5 ? `(${r}+(${high}-${r})*${n(s.balance*2)})` : `(${high}+(${other}-${high})*${n((s.balance-.5)*2)})`;
+  const spill = `(max(0,${blue ? b : g}-${limit})*${n(s.strength)})`;
+  const y = `(.299*${r}+.587*${g}+.114*${b})`, lostY = `(${blue ? '.114' : '.587'}*${spill})`;
+  const restore = `clip(${lostY}/max(.000001,1-(${y}-${lostY})),0,1)`;
+  return colors.map((v,i) => {
+    const changed = i === (blue ? 2 : 1) ? `(${v}-${spill})` : v;
+    return `255*clip(${changed}${s.restore_luminance ? `+(1-${changed})*${restore}` : ''},0,1)`;
+  });
 }
 export function buildBccKey(input: string, prefix: string, c: BccChromaConfig): { filters: string[]; output: string } {
   const f: string[] = [], p = c.primary_key, m = c.matte_cleanup, s = c.spill_suppression;
@@ -37,9 +52,21 @@ export function buildBccKey(input: string, prefix: string, c: BccChromaConfig): 
     `colorlevels=rimin=${n(m.black_clip)}:rimax=${n(m.white_clip)}:gimin=${n(m.black_clip)}:gimax=${n(m.white_clip)}:bimin=${n(m.black_clip)}:bimax=${n(m.white_clip)},` +
     `format=gray,eq=gamma=${n(m.matte_gamma)}${l('polished_matte')}`);
   f.push(`${l('polished_matte')}${l('original_alpha')}blend=all_expr='A*B/255'${l('alpha_clean')}`);
-  const blue = spillType(p.key_color) === 'blue', strength = s.enabled ? s.strength : 0;
-  f.push(`${l('rgb_raw')}${strength > 0 ? `despill=type=${blue ? 'blue' : 'green'}:mix=${n(s.balance)}:expand=0:red=0:green=${n(blue ? 0 : -strength)}:blue=${n(blue ? -strength : 0)}:brightness=${n(s.restore_luminance ? strength * (blue ? .114 : .587) : 0)},` : ''}format=rgb24${l('rgb_despilled')}`);
-  f.push(`${l('rgb_despilled')}${l('alpha_clean')}alphamerge,format=rgba${l('keyed_layer')}`);
+  const strength = s.enabled && bccSpillChannel(p.key_color) ? s.strength : 0;
+  let colorInput = l('rgb_raw'), alpha = l('alpha_clean');
+  if (strength > 0 && s.edges_only) {
+    f.push(`${colorInput}split=2${l('color_keep')}${l('color_correct')}`); colorInput = l('color_correct');
+    f.push(`${alpha}split=2${l('alpha_keep')}${l('spill_src')}`, `${l('spill_src')}split=2${l('spill_inside')}${l('spill_blur_src')}`,
+      `${l('spill_blur_src')}gblur=sigma=${n(Math.max(1,m.matte_softness_px+1))}:steps=1${l('spill_blurred')}`,
+      `${l('spill_inside')}${l('spill_blurred')}blend=all_expr='min(255,max(0,4*(A-B)))'${l('spill_edge')}`);
+    alpha = l('alpha_keep');
+  }
+  const expressions = despillColorExpressions(c);
+  f.push(`${colorInput}${strength > 0 ? `format=gbrp,geq=r='${expressions[0]}':g='${expressions[1]}':b='${expressions[2]}',` : ''}format=gbrp${l('despill_candidate')}`);
+  if (strength > 0 && s.edges_only) f.push(`${l('color_keep')}format=gbrp${l('original_rgb')}`,
+    `${l('original_rgb')}${l('despill_candidate')}${l('spill_edge')}maskedmerge=planes=7${l('rgb_despilled')}`);
+  else f.push(`${l('despill_candidate')}null${l('rgb_despilled')}`);
+  f.push(`${l('rgb_despilled')}${alpha}alphamerge,format=rgba${l('keyed_layer')}`);
   return { filters: f, output: l('keyed_layer') };
 }
 
@@ -51,7 +78,7 @@ export function buildLightWrap(foreground: string, background: string, prefix: s
     `${foreground}split=2${l('fg_color')}${l('fg_alpha')}`,
     `${l('fg_alpha')}alphaextract,split=3${l('alpha_keep')}${l('edge_inside')}${l('edge_blur')}`,
     `${l('edge_blur')}gblur=sigma=${n(w.width_px)}:steps=1${l('edge_soft')}`,
-    `${l('edge_inside')}${l('edge_soft')}blend=all_expr='min(255,max(0,4*A*(1-B/255)*${n(w.intensity)}))'${l('edge')}`,
+    `${l('edge_inside')}${l('edge_soft')}blend=all_expr='min(255,max(0,4*(A-B)*${n(w.intensity)}))'${l('edge')}`,
     `${l('bg_light')}gblur=sigma=${n(w.width_px)}:steps=1,format=gbrp${l('bg_rgb')}`,
     `${l('fg_color')}format=gbrp${l('fg_rgb')}`,
     `${l('fg_rgb')}${l('bg_rgb')}${l('edge')}maskedmerge=planes=7${l('wrap_rgb')}`,

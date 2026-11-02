@@ -7,6 +7,8 @@ import { resolvedTextStyle, chromaSettings } from '../../shared/layer-effects';
 import { removeImageBackground } from '../features/background/ai-client';
 import { migrateTimeline, syncOverlayClips, newTrack } from '../../shared/timeline-migration';
 import { timelineDuration } from '../../shared/timeline';
+import { newBccChroma, type BccChromaConfig } from '../../shared/bcc-chroma';
+import { videoBackgroundConfig } from '../../shared/video-effects';
 
 interface Snapshot { template: Template; trim: Trim }
 interface EditorStore {
@@ -18,6 +20,7 @@ interface EditorStore {
   pickingColorFor: string | null;
   aiTasks: Record<string, { running: boolean; message: string; fraction: number }>;
   pickColor(id: string, hex: string): void; removeBackground(id: string): Promise<void>; cancelBackground(id: string): void;
+  setVideoBackground(config: BccChromaConfig | undefined, clipId?: string, record?: boolean): void;
   autoUpload: boolean; driveFolderId: string; fallback: boolean;
   notification: { message: string; kind: 'error' | 'info' } | null;
   bootstrap(): Promise<void>; change(recipe: (template: Template) => void, record?: boolean): void;
@@ -196,12 +199,28 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   upsertJob(job) { set({ jobs: [...get().jobs.filter(j => j.id !== job.id), job].sort((a, b) => b.createdAt - a.createdAt) }); },
   pickColor(id, hex) {
     if (!/^#[a-f\d]{6}$/i.test(hex)) return;
+    if (id === 'main' || id.startsWith('main:')) {
+      const clipId = id === 'main' ? undefined : id.slice(5), state = get();
+      const clip = clipId ? state.template.timeline?.tracks.flatMap(t => t.clips).find(c => c.id === clipId) : undefined;
+      if (clipId && (!clip || clip.media_type !== 'video')) return;
+      const config = structuredClone(videoBackgroundConfig(state.template,clip) ?? newBccChroma());
+      config.primary_key.key_color = hex; get().setVideoBackground(config,clipId); set({ pickingColorFor:null }); return;
+    }
     get().updateOverlay(id, o => {
       if (o.type === 'text') return;
       if (o.background_removal?.mode === 'bcc_chromakey_studio') { o.background_removal.primary_key.key_color = hex; return; }
       o.background_removal = { ...(chromaSettings(o) ?? { mode: 'chromakey', enabled: true, similarity: 0.15, blend: 0.05, despill: false }), key_color: hex };
       delete o.chroma_key;
     }); set({ pickingColorFor: null });
+  },
+  setVideoBackground(config, clipId, record = true) {
+    get().change(t => {
+      if (!clipId) { t.main_clip_layout.background_removal = config ? structuredClone(config) : undefined; return; }
+      for (const track of t.timeline?.tracks ?? []) {
+        const clip = track.clips.find(c => c.id === clipId);
+        if (clip?.media_type === 'video' && !track.is_locked) clip.background_removal = config ? structuredClone(config) : undefined;
+      }
+    },record);
   },
   async removeBackground(id) {
     if (Object.values(get().aiTasks).some(task => task.running)) throw new Error('Дождитесь текущей AI-обработки или отмените её');

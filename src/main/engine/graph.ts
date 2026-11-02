@@ -4,6 +4,7 @@ import { bccSettings, chromaFilter, chromaSettings, effectiveScale, spillType } 
 import { buildBccKey, buildLightWrap, layerAlphaFilters } from './bcc-chroma';
 import { generateAss, isRichText } from './ass';
 import { audioTrackActive, clipHasAudio, timelineDuration, type TimelineClip } from '../../shared/timeline';
+import { videoBackgroundConfig } from '../../shared/video-effects';
 
 export interface SupportFile { name: string; content: string }
 export interface AssetCopy { name: string; sourcePath: string }
@@ -33,6 +34,7 @@ export function buildGraph(t: Template, duration: number, templateDir: string, s
   const { width: w, height: h, fps, background_color } = t.canvas;
   const layout = t.main_clip_layout;
   const p = layout.Position;
+  const mainKey = layout.background_removal?.enabled ? layout.background_removal : null;
   const filters: string[] = [];
   const inputArgs: string[] = [];
   const files: SupportFile[] = [];
@@ -48,7 +50,7 @@ export function buildGraph(t: Template, duration: number, templateDir: string, s
     filters.push(`color=c=black@0:s=${w}x${h}:r=${fps}:d=${num(duration)},format=rgba[composite0]`);
   } else {
   filters.push(`[0:v]${segment ? `trim=start=${num(segment.source_in_sec)}:end=${num(segment.source_out_sec)}` : `trim=duration=${num(duration)}`},setpts=PTS-STARTPTS,fps=${fps},setsar=1[src]`);
-  if (layout.source_aspect_handling === 'blur_pad' && layout.background_blur.enabled) {
+  if (!mainKey && layout.source_aspect_handling === 'blur_pad' && layout.background_blur.enabled) {
     const blur = layout.background_blur;
     filters.push('[src]split=2[foreground][background]');
     // scale_height is a minimum intermediate height; the final canvas always has the requested dimensions.
@@ -59,7 +61,7 @@ export function buildGraph(t: Template, duration: number, templateDir: string, s
       `eq=brightness=${num(blur.brightness)},scale=${w}:${h}[base]`);
   } else {
     filters.push('[src]null[foreground]');
-    filters.push(`color=c=${rgb(background_color)}:s=${w}x${h}:r=${fps}:d=${num(duration)}[base]`);
+    filters.push(`color=c=${mainKey ? 'black@0' : rgb(background_color)}:s=${w}x${h}:r=${fps}:d=${num(duration)}${mainKey ? ',format=rgba' : ''}[base]`);
   }
   let main = '[foreground]';
   if (layout.source_aspect_handling === 'custom_crop') {
@@ -72,7 +74,16 @@ export function buildGraph(t: Template, duration: number, templateDir: string, s
   else main += `scale=${p.width}:${p.height}:force_original_aspect_ratio=decrease`;
   filters.push(`${main},setsar=1[main]`);
   // The position rectangle is a bounding box. fit_width is vertically centered in that box.
-  filters.push(`[base][main]overlay=x='${num(p.x)}+(${p.width}-w)/2':y='${num(p.y)}+(${p.height}-h)/2':shortest=1[composite0]`);
+  let mainLabel = '[main]';
+  if (mainKey) { const keyed=buildBccKey('[main]format=rgba','main_bcc_',mainKey);filters.push(...keyed.filters);mainLabel=keyed.output; }
+  const mainResult = mainKey && !segment ? 'mainPlaced' : 'composite0';
+  filters.push(`[base]${mainLabel}overlay=x='${num(p.x)}+(${p.width}-w)/2':y='${num(p.y)}+(${p.height}-h)/2':shortest=1${mainKey ? ':format=auto' : ''}[${mainResult}]`);
+  if (mainKey && !segment) {
+    filters.push(`color=c=${rgb(background_color)}:s=${w}x${h}:r=${fps}:d=${num(duration)},format=rgba[mainBacking]`);
+    let bg='[mainBacking]',fg='[mainPlaced]';
+    if (mainKey.light_wrap.enabled && mainKey.light_wrap.intensity>0) {const wrap=buildLightWrap(fg,bg,'main_wrap_',mainKey);filters.push(...wrap.filters);bg=wrap.background;fg=wrap.foreground;}
+    filters.push(`${bg}${fg}overlay=x=0:y=0:eof_action=pass:repeatlast=0:format=auto[composite0]`);
+  }
   }
   let current = 'composite0';
   let inputIndex = onlyOverlay ? 0 : 1;
@@ -180,10 +191,14 @@ function buildTimelineGraph(t: Template, directory: string, includeAudio: boolea
         };
         if (clip.media_type === 'text' && !overlay) throw new Error(`Missing text overlay for ${clip.id}`);
         if (o.type !== 'text') o.source_path = clip.source_path;
+        if (o.type !== 'text' && clip.background_removal) o.background_removal = clip.background_removal;
         if (clip.transform) { Object.assign(o.position, clip.transform); o.scale = clip.transform.scale; o.opacity = clip.transform.opacity; }
         o.timing = { ...o.timing, full_duration: true, fade_in_sec: Math.min(o.timing.fade_in_sec, clip.duration_sec / 2), fade_out_sec: Math.min(o.timing.fade_out_sec, clip.duration_sec / 2) };
         local.overlays = [o];
-      } else { result.inputArgs.push('-i', path.resolve(directory, clip.source_path)); result.assetPaths.push(path.resolve(directory, clip.source_path)); index++; }
+      } else {
+        local.main_clip_layout = {...t.main_clip_layout,background_removal:videoBackgroundConfig(t,clip)};
+        result.inputArgs.push('-i', path.resolve(directory, clip.source_path)); result.assetPaths.push(path.resolve(directory, clip.source_path)); index++;
+      }
       const sub = buildGraph(local, clip.duration_sec, directory, clip);
       // Each subgraph owns its input labels, support filenames and intermediate labels.
       let graph = sub.graph.replace(/\[([^\]]+)\]/g, (_match, label: string) => {
@@ -197,7 +212,8 @@ function buildTimelineGraph(t: Template, directory: string, includeAudio: boolea
       index += sub.inputArgs.filter(arg => arg === '-i').length;
       filters.push(graph, `[${prefix}vout]setpts=PTS-STARTPTS+${num(clip.timeline_start_sec)}/TB[${prefix}placed]`);
       let bg = `[stage${stage}]`, fg = `[${prefix}placed]`;
-      const bcc = overlay && overlay.type !== 'text' ? bccSettings(overlay) : null;
+      const config = videoBackgroundConfig(t,clip,overlay);
+      const bcc = config?.enabled ? config : null;
       if (bcc?.light_wrap.enabled && bcc.light_wrap.intensity > 0) {
         const wrap = buildLightWrap(fg, bg, `${prefix}wrap_`, bcc); filters.push(...wrap.filters); bg = wrap.background; fg = wrap.foreground;
         const opacity = clip.transform?.opacity ?? overlay?.opacity ?? 1;

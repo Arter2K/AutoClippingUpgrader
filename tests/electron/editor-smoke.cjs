@@ -128,6 +128,36 @@ app.whenReady().then(async () => {
     assert.equal(await js('document.querySelector(\'input[aria-label="Trim Out"]\').value'), '2');
     assert.deepEqual(errors, []);
     console.log('PASS: autosaved project rehydrates on reload; no renderer errors');
+    if (process.env.ACU_TEST_MAIN_BCC === '1') {
+      const keySource=path.join(dir,'main-key.mp4');
+      await runProcess(process.env.FFMPEG_PATH??'ffmpeg',['-v','error','-f','lavfi','-i','color=c=0x00FF00:s=320x180:r=30:d=2,drawbox=x=100:y=20:w=120:h=140:color=0xF0BE50:t=fill','-c:v','libx264','-pix_fmt','yuv420p',keySource]);
+      await click('button[aria-label="Новый проект"]');openPath=keySource;await clickText('Импорт медиа');await waitFor('document.querySelector("video.source-decoder")?.readyState>=2');
+      const keyDocument=await readTemplate();Object.assign(keyDocument.canvas,{width:160,height:160,fps:30,background_color:'#0000FF'});
+      Object.assign(keyDocument.main_clip_layout,{source_aspect_handling:'center_crop',Position:{x:0,y:0,width:160,height:160,scale_mode:'cover'}});
+      await click('button[aria-label="Редактор JSON"]');await input('textarea[aria-label="JSON шаблона"]',JSON.stringify(keyDocument));await clickText('Применить JSON');await pause(200);
+      const canvasPixels=`(()=>{const c=document.querySelector('[data-testid="preview-canvas"]'),ctx=c.getContext('2d');return {center:Array.from(ctx.getImageData(Math.round(c.width*.5),Math.round(c.height*.5),1,1).data),background:Array.from(ctx.getImageData(Math.round(c.width*.05),Math.round(c.height*.5),1,1).data)}})()`;
+      const beforeKey=await js(canvasPixels);
+      await js(`Array.from(document.querySelectorAll('.layer-select')).find(b=>b.textContent.includes('Основной клип')).click()`);await click('button[aria-label="Enable Chroma Key"]');
+      await waitFor(`(${canvasPixels}).background[2]>220`);
+      const afterKey=await js(canvasPixels);beforeKey.center.slice(0,3).forEach((v,i)=>assert.ok(Math.abs(afterKey.center[i]-v)<5,JSON.stringify({beforeKey,afterKey})));
+      let saved=await readTemplate();assert.equal(saved.main_clip_layout.background_removal.enabled,true);assert.equal(saved.main_clip_layout.background_removal.spill_suppression.edges_only,true);
+      await clickText('С холста');await waitFor('document.querySelector(".picker-banner")');
+      const keyPoint=await js(`(()=>{const r=document.querySelector('[data-testid="preview-canvas"]').getBoundingClientRect();return {x:Math.round(r.x+r.width*.05),y:Math.round(r.y+r.height*.5)}})()`);
+      win.webContents.sendInputEvent({type:'mouseDown',...keyPoint,button:'left',clickCount:1});win.webContents.sendInputEvent({type:'mouseUp',...keyPoint,button:'left',clickCount:1});
+      await waitFor('!document.querySelector(".picker-banner")');assert.match((await readTemplate()).main_clip_layout.background_removal.primary_key.key_color,/^#[a-f0-9]{6}$/i);
+      await clickText('FFmpeg-кадр');await waitFor('document.querySelector(".reference-frame img")?.naturalWidth>0',40000);await click('button[title="Вернуться к интерактивному холсту"]');
+      const seek=async time=>{const r=await js('(()=>{const r=document.querySelector(".nle-ruler > div").getBoundingClientRect();return {x:r.x,y:r.y+10}})()');win.webContents.sendInputEvent({type:'mouseDown',x:Math.round(r.x+time*60),y:Math.round(r.y),button:'left',clickCount:1});win.webContents.sendInputEvent({type:'mouseUp',x:Math.round(r.x+time*60),y:Math.round(r.y),button:'left',clickCount:1});await pause(150);};
+      await seek(1);await click('.nle-track[data-track-id="track-main"] .nle-clip');await clickText('Split (S)');await waitFor('document.querySelectorAll(\'.nle-track[data-track-id="track-main"] .nle-clip\').length===2');
+      await click('.nle-track[data-track-id="track-main"] .nle-clip');await click('button[aria-label="Enable Chroma Key"]');
+      saved=await readTemplate();assert.equal(saved.main_clip_layout.background_removal.enabled,true);assert.equal(saved.timeline.tracks.find(t=>t.id==='track-main').clips[0].background_removal.enabled,false);
+      await seek(.5);await waitFor(`(${canvasPixels}).background[1]>220`);await seek(1.5);await waitFor(`(${canvasPixels}).background[2]>220`);
+      await click('button[aria-label="Отменить правку"]');await waitFor(`(${canvasPixels}).background[2]>220`);
+      savePath=path.join(dir,'main-key-project.json');await click('button[aria-label="Сохранить проект"]');await pause(800);
+      await writeFile(path.join(artifacts,'main-bcc-preserved-colour.png'),(await win.webContents.capturePage()).toPNG());
+      await win.loadFile(path.resolve('dist/index.html'));await waitFor('document.querySelectorAll(\'.nle-track[data-track-id="track-main"] .nle-clip\').length===2');
+      assert.equal((await readTemplate()).main_clip_layout.background_removal.enabled,true);assert.deepEqual(errors,[]);
+      console.log('PASS: main clip BCC UI, unchanged foreground RGB, canvas eyedropper, FFmpeg, split overrides, undo and project restore');
+    }
     if (process.env.ACU_TEST_TIMELINE === '1') {
       const lane = '.nle-track[data-track-id="track-main"]';
       await js(`document.querySelector(${JSON.stringify(lane)}).scrollIntoView({block:'center'})`); await pause(100);

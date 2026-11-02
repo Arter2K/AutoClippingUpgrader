@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { bccChromaSchema } from './bcc-chroma';
 
 const time = z.number().finite().nonnegative();
 export const timelineClipSchema = z.object({
@@ -10,9 +11,11 @@ export const timelineClipSchema = z.object({
   volume: z.number().finite().min(0).max(2).default(1), muted: z.boolean().default(false),
   fade_in_sec: time.default(0), fade_out_sec: time.default(0),
   use_template_main_layout: z.boolean().default(false),
+  background_removal: bccChromaSchema.optional(),
   transform: z.object({ x: z.number().finite(), y: z.number().finite(), width: z.number().int().min(1).max(16384),
     height: z.number().int().min(1).max(16384), scale: z.number().positive().max(16).default(1), opacity: z.number().min(0).max(1).default(1) }).optional(),
 }).superRefine((c, ctx) => {
+  if (c.background_removal && c.media_type !== 'video') ctx.addIssue({ code: 'custom', message: 'Segment background removal requires video' });
   if (Math.abs(c.source_out_sec - c.source_in_sec - c.duration_sec) > 0.00001)
     ctx.addIssue({ code: 'custom', message: 'Segment duration must equal source_out_sec - source_in_sec' });
   if (c.source_duration_sec !== undefined && c.source_out_sec > c.source_duration_sec + 0.001)

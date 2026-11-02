@@ -1,8 +1,9 @@
 import type { Template, Overlay } from '../../shared/template';
 import { clipGain, timelineDuration } from '../../shared/timeline';
 import { mainGeometry, overlayAlpha, type Rect } from '../../shared/geometry';
-import { bccSettings, chromaSettings, effectiveScale } from '../../shared/layer-effects';
+import { chromaSettings, effectiveScale } from '../../shared/layer-effects';
 import { BccLayerRenderer } from './bcc-layer-renderer';
+import { videoBackgroundConfig, mainPickerTarget } from '../../shared/video-effects';
 import { drawRichText } from './rich-text-canvas';
 import { applyChromaKey } from './chroma-key';
 
@@ -59,13 +60,15 @@ export class TimelinePreview {
       if (visual && ready) {
         if (clip.use_template_main_layout && visual instanceof HTMLVideoElement) {
           const w = template.canvas.width, h = template.canvas.height, blur = template.main_clip_layout.background_blur;
-          if (template.main_clip_layout.source_aspect_handling === 'blur_pad' && blur.enabled) {
+          const mainKey=videoBackgroundConfig(template,clip),keyed=mainKey?.enabled;
+          if (!keyed && template.main_clip_layout.source_aspect_handling === 'blur_pad' && blur.enabled) {
             const r = Math.max(w / visual.videoWidth, h / visual.videoHeight), sw = w / r, sh = h / r;
             ctx.save(); ctx.filter = `blur(${blur.luma_radius}px) brightness(${Math.max(0, 1 + blur.brightness)})`;
             ctx.drawImage(visual, (visual.videoWidth - sw) / 2, (visual.videoHeight - sh) / 2, sw, sh, 0, 0, w, h); ctx.restore();
-          } else { ctx.fillStyle = template.canvas.background_color; ctx.fillRect(0, 0, w, h); }
+          } else if(!keyed) { ctx.fillStyle = template.canvas.background_color; ctx.fillRect(0, 0, w, h); }
           const geometry = mainGeometry(template, visual.videoWidth, visual.videoHeight), s = geometry.source, d = geometry.target;
-          ctx.drawImage(visual, s.x, s.y, s.width, s.height, d.x, d.y, d.width, d.height);
+          if(keyed && decoder) {decoder.bcc??=new BccLayerRenderer();decoder.bcc.drawCropped(ctx,visual,mainKey,geometry,picking==='main'||picking===mainPickerTarget(clip));}
+          else ctx.drawImage(visual, s.x, s.y, s.width, s.height, d.x, d.y, d.width, d.height);
           boxes.set('main', { ...template.main_clip_layout.Position });
         } else {
           const mediaOverlay = o ?? null;
@@ -76,9 +79,10 @@ export class TimelinePreview {
           const angle = mediaOverlay?.position.rotation ?? 0;
           ctx.translate(rect.x + rect.width / 2, rect.y + rect.height / 2); ctx.rotate(angle * Math.PI / 180); ctx.translate(-rect.x - rect.width / 2, -rect.y - rect.height / 2);
           const key = mediaOverlay && picking !== mediaOverlay.id ? chromaSettings(mediaOverlay) : null;
-          const bcc = mediaOverlay ? bccSettings(mediaOverlay) : null;
+          const background=videoBackgroundConfig(template,clip,mediaOverlay??undefined);
+          const bcc=background?.enabled?background:null;
           if (bcc && decoder) {
-            decoder.bcc ??= new BccLayerRenderer(); decoder.bcc.draw(ctx, visual, bcc, rect, picking === mediaOverlay!.id);
+            decoder.bcc ??= new BccLayerRenderer(); decoder.bcc.draw(ctx, visual, bcc, rect, picking === mediaOverlay?.id || picking===mainPickerTarget(clip));
           } else if (key && decoder) {
             decoder.keyed ??= document.createElement('canvas'); const canvas = decoder.keyed;
             const w = Math.max(1, Math.round(Math.min(512, rect.width))), h = Math.max(1, Math.round(rect.height * w / rect.width));

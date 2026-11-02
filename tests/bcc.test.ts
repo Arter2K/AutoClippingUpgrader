@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bccChromaSchema, newBccChroma, bccRawAlpha, bccMatteLevel, bccDespill, averagePixelColor, morphologyPasses } from '../src/shared/bcc-chroma';
+import { bccChromaSchema, newBccChroma, bccRawAlpha, bccMatteLevel, bccDespill, bccSpillChannel, averagePixelColor, morphologyPasses } from '../src/shared/bcc-chroma';
+import { videoBackgroundConfig } from '../src/shared/video-effects';
 import { bccSettings } from '../src/shared/layer-effects';
 import { buildBccKey, buildLightWrap, layerAlphaFilters, weightedAlphaExpression } from '../src/main/engine/bcc-chroma';
 import { buildGraph } from '../src/main/engine/graph';
@@ -8,6 +9,7 @@ import { templateSchema } from '../src/shared/template';
 import { newTemplate } from '../src/shared/defaults';
 import { migrateTimeline } from '../src/shared/timeline-migration';
 import { useEditorStore } from '../src/renderer/stores/editor-store';
+import { useTimelineStore } from '../src/renderer/stores/timeline-store';
 
 test('BCC defaults, bounds, clip ordering and legacy compatibility', () => {
   const c = newBccChroma(); assert.equal(c.matte_cleanup.matte_choke_px, -1.5); assert.equal(c.primary_key.similarity, .14);
@@ -39,15 +41,45 @@ test('FFmpeg matte graph contains fractional choke, blur, levels, gamma, despill
   const c = newBccChroma(), graph = buildBccKey('[0:v]format=rgba','key_',c).filters.join(';');
   assert.match(graph,/split=3\[key_rgb_raw\]\[key_key_src\]/); assert.match(graph,/erosion=coordinates=255/); assert.match(graph,/A\*0.5\+B\*0.5/);
   assert.match(graph,/gblur=sigma=1.5/); assert.match(graph,/colorlevels=rimin=0.1:rimax=0.9/); assert.match(graph,/eq=gamma=1/);
-  assert.match(graph,/despill=type=green:mix=0.5:expand=0:red=0:green=-0.85:blue=0:brightness=0.49895/);
+  assert.match(graph,/despill_candidate/); assert.match(graph,/spill_edge/); assert.match(graph,/maskedmerge=planes=7/);
   assert.match(graph,/blend=all_expr='A\*B\/255'/); assert.match(graph,/alphamerge/); assert.ok(weightedAlphaExpression(c).includes('pow('));
   c.primary_key.hue_weight=1;c.primary_key.saturation_weight=1;c.primary_key.luma_weight=0;c.matte_cleanup.matte_choke_px=2;
   const native = buildBccKey('[0:v]format=rgba','n_',c).filters.join(';'); assert.match(native,/chromakey=color=0x00FF00:similarity=0.14:blend=0.25/); assert.equal((native.match(/dilation=/g)??[]).length,2);
   const wrap=buildLightWrap('[fg]','[bg]','wrap_',c).filters.join(';'); assert.match(wrap,/gblur=sigma=6/); assert.match(wrap,/maskedmerge=planes=7/);
   assert.equal(layerAlphaFilters(.5,2,5,.2,.4),'colorchannelmixer=aa=0.5,fade=t=in:st=2:d=0.2:alpha=1,fade=t=out:st=4.6:d=0.4:alpha=1');
 });
+test('despill preserves warm colours, grey and luminance without clipping highlights; non-screen keys do not tint RGB',()=>{
+  const c=newBccChroma();
+  for(const rgb of [[1,1,0],[.94,.75,.31],[.5,.5,.5],[.95,1,.95]]) {
+    assert.deepEqual(bccDespill(rgb,c,0),rgb);
+    const out=bccDespill(rgb,c),y=(v:readonly number[])=>.299*v[0]!+.587*v[1]!+.114*v[2]!;
+    assert.ok(Math.abs(y(rgb)-y(out))<.000001);assert.ok(out.every(v=>v>=0&&v<=1));
+  }
+  c.primary_key.key_color='#FF0000';assert.equal(bccSpillChannel('#FF0000'),null);assert.deepEqual(bccDespill([.3,.8,.2],c),[.3,.8,.2]);
+  assert.equal(bccSpillChannel('#000000'),null);assert.equal(bccSpillChannel('#00FF00'),'green');assert.equal(bccSpillChannel('#0000FF'),'blue');
+});
+test('main and per-video BCC persist, split independently, detach without audio effects, and support undo/eyedropper',()=>{
+  const t=newTemplate(),config=newBccChroma();t.main_clip_layout.background_removal=config;
+  t.timeline=migrateTimeline(t,{id:'s',name:'s',path:'source.mp4',url:'',thumbnails:[],media:{durationSec:4,width:64,height:64,hasAudio:true}},{inSec:0,outSec:4});
+  assert.equal(templateSchema.parse(t).main_clip_layout.background_removal?.enabled,true);
+  useEditorStore.setState({template:t,past:[],future:[]});useEditorStore.getState().pickColor('main','#008000');
+  assert.equal(useEditorStore.getState().template.main_clip_layout.background_removal?.primary_key.key_color,'#008000');
+  const disabled={...newBccChroma(),enabled:false};useEditorStore.getState().setVideoBackground(disabled,'clip-main');
+  const changed=useEditorStore.getState().template,clip=changed.timeline!.tracks[0]!.clips[0]!;
+  assert.equal(videoBackgroundConfig(changed,clip)?.enabled,false);
+  useEditorStore.getState().pickColor('main:clip-main','#0000FF');assert.equal(videoBackgroundConfig(useEditorStore.getState().template,useEditorStore.getState().template.timeline!.tracks[0]!.clips[0])?.primary_key.key_color,'#0000FF');
+  useEditorStore.getState().setVideoBackground(undefined,'clip-main');assert.equal(videoBackgroundConfig(useEditorStore.getState().template,useEditorStore.getState().template.timeline!.tracks[0]!.clips[0])?.primary_key.key_color,'#008000');
+  useEditorStore.getState().undo();assert.equal(useEditorStore.getState().template.timeline!.tracks[0]!.clips[0]!.background_removal?.primary_key.key_color,'#0000FF');
+  useEditorStore.setState({playhead:2});useTimelineStore.getState().selectClip('clip-main');useTimelineStore.getState().splitClipAtPlayhead();
+  let parts=useEditorStore.getState().template.timeline!.tracks[0]!.clips;assert.equal(parts.length,2);
+  useEditorStore.getState().setVideoBackground({...newBccChroma(),primary_key:{...newBccChroma().primary_key,key_color:'#FF0000'}},parts[0]!.id);
+  parts=useEditorStore.getState().template.timeline!.tracks[0]!.clips;assert.equal(parts[1]!.background_removal?.primary_key.key_color,'#0000FF');
+  useTimelineStore.getState().detachAudio(parts[0]!.id);
+  const audio=useEditorStore.getState().template.timeline!.tracks.find(track=>track.type==='audio')!.clips[0]!;
+  assert.equal(audio.background_removal,undefined);assert.equal(templateSchema.safeParse(useEditorStore.getState().template).success,true);
+});
 test('BCC is compiled per layer, wraps actual lower timeline stage, preview mode never leaks to export and eyedropper keeps settings', () => {
-  const t=newTemplate(), config=newBccChroma();
+  const t=newTemplate(), config=newBccChroma();config.light_wrap.enabled=true;
   t.overlays=templateSchema.parse({...t,overlays:[{id:'key',name:'key',type:'image',source_path:'key.png',position:{x:10,y:20,width:64,height:64},z_index:1,timing:{full_duration:true},background_removal:config}]}).overlays;
   const o=t.overlays[0]!; if(o.type==='text')throw Error(); assert.equal(bccSettings(o)?.mode,'bcc_chromakey_studio');
   const final=buildGraph(t,2,'.').graph; config.view_mode='alpha_matte'; o.background_removal=config; assert.equal(buildGraph(t,2,'.').graph,final);

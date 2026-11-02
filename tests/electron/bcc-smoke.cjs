@@ -25,6 +25,9 @@ app.whenReady().then(async()=>{
       const sample=(x,y=32)=>Array.from(o.getImageData(x,y,1,1).data);
       const draw=()=>{o.clearRect(0,0,64,64);o.drawImage(shader.render(input,bg,config,64,64),0,0);};
       draw();const final=[sample(8),sample(24),sample(40),sample(56)];
+      ctx.clearRect(0,0,64,64);ctx.fillStyle='rgba(240,190,80,0.5)';ctx.fillRect(0,0,64,64);
+      config.light_wrap.enabled=true;config.light_wrap.intensity=1;config.light_wrap.width_px=3;draw();const preservedColor=sample(32);
+      ctx.putImageData(pixels,0,0);config.light_wrap.enabled=false;
       config.view_mode='alpha_matte';draw();const matte=[sample(8),sample(24),sample(40),sample(56)];
       config.view_mode='source_only';draw();const source=sample(8);
       config.view_mode='alpha_matte';ctx.fillStyle='#00FF00';ctx.fillRect(0,0,64,64);ctx.fillStyle='red';ctx.fillRect(16,16,32,32);
@@ -40,10 +43,11 @@ app.whenReady().then(async()=>{
       const gl=shader.canvas.getContext('webgl2');const error=gl.getError();
       const time=performance.now();for(let i=0;i<10;i++)shader.render(input,bg,config,64,64);gl.finish();const benchmarkMs=(performance.now()-time)/10;
       shader.canvas.style.width=output.style.width='256px';shader.canvas.style.height=output.style.height='256px';document.body.append(output,shader.canvas);
-      const screenshot=output.toDataURL();shader.dispose();return {final,matte,source,eroded,dilated,softened,gamma,blueWrap,whiteWrap,nativeKey,neutralKey,error,benchmarkMs,screenshot};
+      const screenshot=output.toDataURL();shader.dispose();return {final,preservedColor,matte,source,eroded,dilated,softened,gamma,blueWrap,whiteWrap,nativeKey,neutralKey,error,benchmarkMs,screenshot};
     })()`);
     assert.equal(result.error,0,'WebGL must not report feedback/invalid operations');
     assert.equal(result.final[0][3],0);assert.ok(Math.abs(result.final[1][3]-128)<3);assert.equal(result.final[2][3],0);assert.equal(result.final[3][3],255);
+    [240,190,80,128].forEach((v,i)=>assert.ok(Math.abs(result.preservedColor[i]-v)<4,JSON.stringify(result.preservedColor)));
     assert.deepEqual(result.matte[0],[0,0,0,255]);assert.ok(Math.abs(result.matte[1][0]-128)<3);assert.deepEqual(result.matte[3],[255,255,255,255]);
     assert.deepEqual(result.source,[0,255,0,255]);assert.ok(result.eroded[0][0]<3);assert.ok(Math.abs(result.eroded[1][0]-128)<3);assert.equal(result.eroded[2][0],255);
     assert.ok(Math.abs(result.dilated[0][0]-128)<3);assert.equal(result.dilated[1][0],255);assert.ok(result.softened[0]>0&&result.softened[0]<255);assert.ok(result.gamma[0]>result.softened[0]);

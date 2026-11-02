@@ -6,8 +6,9 @@ import { useEditorStore } from '../stores/editor-store';
 export class BccLayerRenderer {
   private shader: BccChromaKeyShader | null = null;
   private background = document.createElement('canvas');
+  private cropped = document.createElement('canvas');
   private failed = false;
-  draw(ctx: CanvasRenderingContext2D, source: HTMLVideoElement | HTMLImageElement, config: BccChromaConfig, rect: Rect, sourceOnly = false) {
+  draw(ctx: CanvasRenderingContext2D, source: HTMLVideoElement | HTMLImageElement | HTMLCanvasElement, config: BccChromaConfig, rect: Rect, sourceOnly = false) {
     if (sourceOnly || config.view_mode === 'source_only' || this.failed) { ctx.drawImage(source, rect.x, rect.y, rect.width, rect.height); return; }
     try {
       this.shader ??= new BccChromaKeyShader();
@@ -27,5 +28,12 @@ export class BccLayerRenderer {
       ctx.drawImage(source, rect.x, rect.y, rect.width, rect.height);
     }
   }
-  dispose() { this.shader?.dispose(); this.shader = null; this.background.width = this.background.height = 1; }
+  drawCropped(ctx:CanvasRenderingContext2D,source:HTMLVideoElement,config:BccChromaConfig,geometry:{source:Rect;target:Rect},sourceOnly=false) {
+    const {source:s,target:d}=geometry,t=ctx.getTransform(),scale=Math.max(.01,Math.min(1,Math.hypot(t.a,t.b),2048/Math.max(d.width,d.height)));
+    const w=Math.max(1,Math.round(d.width*scale)),h=Math.max(1,Math.round(d.height*scale)),canvas=this.cropped;
+    if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
+    const c=canvas.getContext('2d')!;c.clearRect(0,0,w,h);c.drawImage(source,s.x,s.y,s.width,s.height,0,0,w,h);
+    this.draw(ctx,canvas,config,d,sourceOnly);
+  }
+  dispose() { this.shader?.dispose(); this.shader = null; this.background.width = this.background.height = this.cropped.width = this.cropped.height = 1; }
 }

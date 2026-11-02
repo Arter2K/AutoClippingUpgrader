@@ -66,6 +66,7 @@ export const templateSchema = z.object({
     height: pixels.refine(v => v % 2 === 0, 'Height must be even'), aspect_ratio: z.string(),
     fps: z.union([z.literal(30), z.literal(60), z.literal(120)]), background_color: color }),
   main_clip_layout: z.object({
+    background_removal: bccChromaSchema.optional(),
     source_aspect_handling: z.enum(['blur_pad', 'center_crop', 'custom_crop']),
     Position: rectangle.extend({ scale_mode: z.enum(['fit_width', 'contain', 'cover']) }),
     source_crop: rectangle.optional(),

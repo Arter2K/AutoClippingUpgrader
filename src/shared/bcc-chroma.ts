@@ -14,9 +14,9 @@ export const bccChromaSchema = z.object({
     matte_gamma: finite.min(.2).max(3).default(1),
   }).prefault({}).refine(v => v.white_clip - v.black_clip >= .001, 'White Clip must exceed Black Clip by at least 0.001'),
   spill_suppression: z.object({ enabled: z.boolean().default(true), strength: unit.default(.85),
-    balance: unit.default(.5), restore_luminance: z.boolean().default(true),
+    balance: unit.default(.5), restore_luminance: z.boolean().default(true), edges_only: z.boolean().default(true),
   }).prefault({}),
-  light_wrap: z.object({ enabled: z.boolean().default(true), intensity: unit.default(.15), width_px: finite.min(1).max(30).default(6) }).prefault({}),
+  light_wrap: z.object({ enabled: z.boolean().default(false), intensity: unit.default(.15), width_px: finite.min(1).max(30).default(6) }).prefault({}),
 });
 export type BccChromaConfig = z.infer<typeof bccChromaSchema>;
 export const newBccChroma = (): BccChromaConfig => bccChromaSchema.parse({ mode: 'bcc_chromakey_studio' });
@@ -40,14 +40,26 @@ export function bccMatteLevel(alpha: number, config: BccChromaConfig): number {
   const c = config.matte_cleanup;
   return clampUnit((alpha - c.black_clip) / (c.white_clip - c.black_clip)) ** (1 / c.matte_gamma);
 }
-/** Same spillmap and channel scales as FFmpeg despill (green AND blue scales explicit). */
-export function bccDespill(rgb: readonly number[], config: BccChromaConfig): number[] {
+export function bccSpillChannel(color: string): 'green' | 'blue' | null {
+  const [r,g,b] = keyRgb(color);
+  return g > r + .05 && g >= b ? 'green' : b > r + .05 && b > g ? 'blue' : null;
+}
+/** Remove excess screen colour, then restore Y by moving within the RGB gamut. */
+export function bccDespill(rgb: readonly number[], config: BccChromaConfig, edgeWeight = 1): number[] {
   const s = config.spill_suppression, [r = 0, g = 0, b = 0] = rgb;
-  if (!s.enabled || s.strength === 0) return [r, g, b];
-  const blue = keyRgb(config.primary_key.key_color)[2] > keyRgb(config.primary_key.key_color)[1];
-  const spill = Math.max(0, (blue ? b : g) - (r * s.balance + (blue ? g : b) * (1 - s.balance))) * s.strength;
-  const restore = s.restore_luminance ? (blue ? .114 : .587) : 0;
-  return [r + spill * restore, g + spill * (restore - (blue ? 0 : 1)), b + spill * (restore - (blue ? 1 : 0))].map(clampUnit);
+  const channel = bccSpillChannel(config.primary_key.key_color);
+  if (!s.enabled || s.strength === 0 || !channel) return [r, g, b];
+  const blue = channel === 'blue', other = blue ? g : b, high = Math.max(r, other);
+  const limit = s.balance <= .5 ? r + (high - r) * (s.balance * 2) : high + (other - high) * ((s.balance - .5) * 2);
+  const spill = Math.max(0, (blue ? b : g) - limit) * s.strength;
+  let color = [r, g - (blue ? 0 : spill), b - (blue ? spill : 0)];
+  if (s.restore_luminance) {
+    const y = .299*r + .587*g + .114*b, changedY = .299*color[0]! + .587*color[1]! + .114*color[2]!;
+    const factor = clampUnit((y - changedY) / Math.max(.000001, 1 - changedY));
+    color = color.map(v => v + (1 - v) * factor);
+  }
+  const amount = s.edges_only ? clampUnit(edgeWeight) : 1;
+  return color.map((v,i) => clampUnit(rgb[i]! + (v - rgb[i]!) * amount));
 }
 export function morphologyPasses(choke: number): { count: number; fraction: number; expand: boolean } {
   return { count: Math.floor(Math.abs(choke)), fraction: Math.abs(choke) % 1, expand: choke > 0 };
