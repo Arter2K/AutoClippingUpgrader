@@ -12,19 +12,23 @@ import { useTimelineStore } from '../stores/timeline-store';
 import { RenderInspector, RenderAction } from '../features/render/RenderInspector';
 import { ConnectionsPanel } from '../features/publishing/ConnectionsPanel';
 import { templateSchema } from '../../shared/template';
-import { newTemplate } from '../../shared/defaults';
+import { ProjectMenu } from '../features/projects/ProjectMenu';
+import { saveCurrentProject,openCurrentProject,newCurrentProject,dropCurrentProject,projectIsDirty } from '../features/projects/project-actions';
+import { isProjectFile } from '../../shared/project';
 
 export function App() {
   const name = useEditorStore(s => s.name), template = useEditorStore(s => s.template), source = useEditorStore(s => s.source), tab = useEditorStore(s => s.tab);
   const draftStatus = useEditorStore(s => s.draftStatus), initialized = useEditorStore(s => s.initialized), loading = useEditorStore(s => s.loading);
   const canUndo = useEditorStore(s => s.past.length > 0), canRedo = useEditorStore(s => s.future.length > 0), notification = useEditorStore(s => s.notification);
   const jobs = useEditorStore(s => s.jobs), lastOutput = jobs.find(job => !!job.publishFile)?.publishFile;
+  const projectPath=useEditorStore(s=>s.projectPath),projectBusy=useEditorStore(s=>s.projectBusy);
+  const dirty=useEditorStore(projectIsDirty);
   const [jsonOpen, setJsonOpen] = useState(false), [json, setJson] = useState(''), [jsonError, setJsonError] = useState('');
   const [canvasOpen, setCanvasOpen] = useState(false), [custom, setCustom] = useState({ width: 1080, height: 1920 });
   const [dragging, setDragging] = useState(false), [help, setHelp] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null), saveSequence = useRef(0);
   const openJson = () => { setJson(JSON.stringify(useEditorStore.getState().template, null, 2)); setJsonError(''); setJsonOpen(true); };
-  const saveProject = () => task(async () => { if (await window.desktop.editor.saveProject(projectSnapshot())) useEditorStore.getState().notify('Проект сохранён', 'info'); });
+  const saveProject = () => task(()=>saveCurrentProject());
   useEffect(() => {
     void useEditorStore.getState().bootstrap();
     const offJob = window.desktop.editor.onJob(job => useEditorStore.getState().upsertJob(job));
@@ -32,7 +36,8 @@ export function App() {
       void window.desktop.editor.saveDraft(projectSnapshot()).catch(() => {}).finally(() => void window.desktop.editor.confirmClose());
     });
     const offState = useEditorStore.subscribe((state, previous) => {
-      if (!state.initialized || state.revision === previous.revision && state.autoUpload === previous.autoUpload && state.driveFolderId === previous.driveFolderId && state.fallback === previous.fallback) return;
+      if(state.projectBusy){if(saveTimer.current)clearTimeout(saveTimer.current);saveSequence.current++;return;}
+      if (!state.initialized || !previous.projectBusy && state.revision === previous.revision && state.autoUpload === previous.autoUpload && state.driveFolderId === previous.driveFolderId && state.fallback === previous.fallback) return;
       if (saveTimer.current) clearTimeout(saveTimer.current);
       useEditorStore.setState({ draftStatus: 'saving' }); const index = ++saveSequence.current;
       saveTimer.current = setTimeout(() => {
@@ -51,11 +56,11 @@ export function App() {
     const handler = (event: globalThis.KeyboardEvent) => {
       const target = event.target as HTMLElement;
       const state = useEditorStore.getState(), mod = event.ctrlKey || event.metaKey, key = event.key.toLowerCase();
-      if (key === 'escape') { setJsonOpen(false); setCanvasOpen(false); setHelp(false); useEditorStore.setState({ pickingColorFor: null }); return; }
+      if (key === 'escape') { document.querySelector('.project-menu')?.removeAttribute('open'); setJsonOpen(false); setCanvasOpen(false); setHelp(false); useEditorStore.setState({ pickingColorFor: null }); return; }
       if (document.querySelector('[role="dialog"]')) return;
-      if (mod && key === 's') { event.preventDefault(); target.blur(); setTimeout(() => void saveProject(), 0); return; }
+      if (mod && key === 's') { event.preventDefault(); target.blur(); const saveAs=event.shiftKey;setTimeout(() => void task(()=>saveCurrentProject(saveAs)), 0); return; }
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable) return;
-      if (mod && key === 'o') { event.preventDefault(); void task(async () => { const document = await window.desktop.editor.openProject(); if (document) state.applyDocument(document); }); }
+      if (mod && key === 'o') { event.preventDefault(); void task(()=>openCurrentProject()); }
       else if (mod && key === 'i') { event.preventDefault(); void loadSource(() => window.desktop.editor.selectSource()); }
       else if (mod && key === 'z') { event.preventDefault(); if (event.shiftKey) state.redo(); else state.undo(); }
       else if (mod && key === 'y') { event.preventDefault(); state.redo(); }
@@ -93,21 +98,18 @@ export function App() {
   return <div className="editor-app">
     <header className="app-header"><div className="brand"><span className="brand-icon"><Clapperboard size={21} strokeWidth={1.7} /></span><div><strong>AutoClipping<span>Upgrader</span></strong><small>CREATE. REFINE. SHARE.</small></div></div>
       <div className="project-breadcrumb"><ChevronRight size={13} /><input aria-label="Название проекта" value={name} onChange={event => useEditorStore.setState(s => ({ name: event.target.value, revision: s.revision + 1 }))} />
+        <span className="project-file-state" title={projectPath??'Проект ещё не сохранён в файл'}>{projectPath?.split(/[\\/]/).at(-1)??'.acup'}{dirty?' *':''}</span>
         <span className={`autosave ${draftStatus}`} title="Автоматическое сохранение локального черновика">{draftStatus === 'saved' ? <Check size={11} /> : draftStatus === 'saving' ? <LoaderCircle size={11} className="spin" /> : <X size={11} />}{draftStatus === 'saved' ? 'Черновик сохранён' : draftStatus === 'saving' ? 'Сохранение…' : 'Не сохранён'}</span>
       </div>
-      <div className="header-actions"><Button size="icon" variant="ghost" title="Новый проект" aria-label="Новый проект" onClick={() => {
-        useEditorStore.getState().applyDocument({ name: 'Untitled project', template: newTemplate(), source: null, assets: {}, warnings: [], trim: { inSec: 0, outSec: 10 } });
-      }}><Plus size={16} /></Button><Button size="icon" variant="ghost" title="Открыть проект (Ctrl+O)" aria-label="Открыть проект" onClick={() => void task(async () => {
-        const project = await window.desktop.editor.openProject(); if (project) useEditorStore.getState().applyDocument(project);
-      })}><FolderOpen size={16} /></Button><Button size="icon" variant="ghost" title="Сохранить проект (Ctrl+S)" aria-label="Сохранить проект" onClick={saveProject}><Save size={16} /></Button>
+      <div className="header-actions"><ProjectMenu/><Button size="icon" variant="ghost" disabled={projectBusy} title="Новый проект" aria-label="Новый проект" onClick={()=>void task(newCurrentProject)}><Plus size={16} /></Button><Button size="icon" variant="ghost" disabled={projectBusy} title="Открыть проект (Ctrl+O)" aria-label="Открыть проект" onClick={() => void task(()=>openCurrentProject())}><FolderOpen size={16} /></Button><Button size="icon" variant="ghost" disabled={projectBusy} title="Сохранить проект (Ctrl+S)" aria-label="Сохранить проект" onClick={saveProject}><Save size={16} /></Button>
         <span className="toolbar-divider" /><Button variant="default" size="sm" disabled={loading} onClick={() => void loadSource(() => window.desktop.editor.selectSource())}><Upload size={14} />Импорт медиа</Button>
       </div>
     </header>
     <div className={`workspace ${initialized ? '' : 'booting'}`}>
-      <aside className="left-sidebar"><div className="sidebar-title"><span>PROJECT STUDIO</span><span className="version-pill">v0.6.1</span></div><TemplatePanel onJson={openJson} /><LayerPanel /></aside>
+      <aside className="left-sidebar"><div className="sidebar-title"><span>PROJECT STUDIO</span><span className="version-pill">v0.7.0</span></div><TemplatePanel onJson={openJson} /><LayerPanel /></aside>
       <main className={`editor-center ${dragging ? 'is-dragging' : ''}`} onDragOver={event => { event.preventDefault(); if (event.dataTransfer.types.includes('Files')) setDragging(true); }}
         onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false); }} onDrop={event => {
-          event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) void loadSource(() => window.desktop.editor.dropSource(file));
+          event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) {if(isProjectFile(file.name))void task(()=>dropCurrentProject(file));else void loadSource(() => window.desktop.editor.dropSource(file));}
         }}>
         <div className="canvas-controls"><div><span className="workspace-heading">Холст</span><span className="aspect-badge">{template.canvas.aspect_ratio}</span>
           <select aria-label="Разрешение холста" value={format} onChange={event => {

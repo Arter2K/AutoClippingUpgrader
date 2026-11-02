@@ -13,6 +13,7 @@ import { videoBackgroundConfig } from '../../shared/video-effects';
 interface Snapshot { template: Template; trim: Trim }
 interface EditorStore {
   initialized: boolean; loading: boolean; name: string; template: Template; source: SourceMedia | null;
+  projectPath: string | null; savedRevision: number; savedSettings: string; projectBusy: boolean;
   assets: Record<string, string>; library: LibraryEntry[]; defaultFont: MediaAsset | null;
   trim: Trim; playhead: number; playing: boolean; muted: boolean; selectedId: string;
   grid: boolean; snap: boolean; zoom: number; revision: number; draftStatus: 'saved' | 'saving' | 'error';
@@ -37,6 +38,7 @@ const snapshot = (state: EditorStore): Snapshot => ({ template: structuredClone(
 const history = (state: EditorStore) => ({ past: [...state.past.slice(-49), snapshot(state)], future: [] as Snapshot[] });
 export const useEditorStore = create<EditorStore>((set, get) => ({
   initialized: false, loading: false, name: 'Untitled project', template: newTemplate(), source: null,
+  projectPath:null,savedRevision:0,savedSettings:JSON.stringify([false,'',true]),projectBusy:false,
   assets: {}, library: [], defaultFont: null, trim: { inSec: 0, outSec: 10 }, playhead: 0,
   playing: false, muted: false, selectedId: 'main', grid: false, snap: true, zoom: 1,
   revision: 0, draftStatus: 'saved', past: [], future: [], jobs: [], tab: 'render',
@@ -144,7 +146,10 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   },
   applyDocument(document) {
     if (!document.template.timeline && document.source?.path) document.template.timeline = migrateTimeline(document.template, document.source, document.trim);
+    const nextRevision=get().revision+1,blank=!document.source&&!document.template.overlays.length&&!document.template.timeline?.tracks.some(t=>t.clips.length);
     set({ template: document.template, name: document.name, source: document.source, trim: document.trim,
+      projectPath:document.projectPath??null,savedRevision:document.recoveredDraft?-1:document.projectPath||blank?nextRevision:-1,
+      savedSettings:JSON.stringify([document.settings?.autoUpload??false,document.settings?.driveFolderId??'',document.settings?.fallback??true]),
       assets: { ...get().assets, ...document.assets, ...(document.source?.path ? { [document.source.path]: document.source.url } : {}) }, playhead: document.template.timeline ? Math.min(document.template.timeline.playhead_sec, Math.max(0, document.template.timeline.total_duration_sec - 0.001)) : document.trim.inSec, playing: false,
       selectedId: 'main', past: [], future: [], revision: get().revision + 1, autoUpload: document.settings?.autoUpload ?? false,
       driveFolderId: document.settings?.driveFolderId ?? '', fallback: document.settings?.fallback ?? true });
@@ -249,7 +254,7 @@ const aiControllers = new Map<string, AbortController>();
 
 export function projectSnapshot() {
   const state = useEditorStore.getState();
-  return { name: state.name, template: state.template.timeline ? { ...state.template, timeline: { ...state.template.timeline, playhead_sec: state.playhead } } : state.template, sourceId: state.source?.id ?? null, trim: state.trim,
+  return { name: state.name, projectPath:state.projectPath, template: state.template.timeline ? { ...state.template, timeline: { ...state.template.timeline, playhead_sec: state.playhead } } : state.template, sourceId: state.source?.id ?? null, trim: state.trim,
     settings: { autoUpload: state.autoUpload, driveFolderId: state.driveFolderId, fallback: state.fallback } };
 }
 export async function task(action: () => Promise<unknown>) {

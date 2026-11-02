@@ -3,7 +3,7 @@ require('tsx/cjs');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
-const { mkdir, mkdtemp, readFile, rm, writeFile, copyFile, stat } = require('node:fs/promises');
+const { mkdir, mkdtemp, readFile, rm, writeFile, copyFile, stat, rename } = require('node:fs/promises');
 const { registerPublishing } = require('../../src/main/services/publishing-hub.ts');
 const { registerEditor } = require('../../src/main/editor/handlers.ts');
 const { attachDraftClose } = require('../../src/main/editor/window-lifecycle.ts');
@@ -25,9 +25,11 @@ app.whenReady().then(async () => {
   const source = path.join(dir, 'source.mp4'), output = path.join(dir, 'rendered.mp4');
   let openPath = source;
   let win, editor, savePath = path.join(dir, 'template.json');
-  const originalOpen = dialog.showOpenDialog, originalSave = dialog.showSaveDialog;
-  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [openPath] });
-  dialog.showSaveDialog = async () => ({ canceled: false, filePath: savePath });
+  let saveCalls=0,messageCalls=0,messageResponse=1,cancelSave=false,cancelOpen=false;
+  const originalOpen = dialog.showOpenDialog, originalSave = dialog.showSaveDialog, originalMessage = dialog.showMessageBox;
+  dialog.showOpenDialog = async () => ({ canceled: cancelOpen, filePaths: cancelOpen?[]:[openPath] });
+  dialog.showSaveDialog = async () => {saveCalls++;return { canceled: cancelSave, filePath: cancelSave?undefined:savePath };};
+  dialog.showMessageBox = async () => {messageCalls++;return { response: messageResponse, checkboxChecked: false };};
   try {
     await runProcess(process.env.FFMPEG_PATH ?? 'ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=640x360:r=30:d=4',
       '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=4', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-shortest', source]);
@@ -110,7 +112,7 @@ app.whenReady().then(async () => {
     await click('button[aria-label="Свой размер холста"]');
     await input('input[aria-label="Ширина холста"]', 360); await input('input[aria-label="Высота холста"]', 640); await clickText('Изменить размер');
     t = await readTemplate(); assert.equal(t.canvas.width, 360); assert.equal(t.canvas.height, 640);
-    savePath = path.join(dir, 'project.acu.json'); await click('button[aria-label="Сохранить проект"]'); await pause(100);
+    savePath = path.join(dir, 'project.acup'); await click('button[aria-label="Сохранить проект"]'); await pause(100);
     assert.equal(JSON.parse(await readFile(savePath, 'utf8')).format, 'AutoClippingUpgrader');
     savePath = output;
     await click('[data-testid="render-button"]');
@@ -128,6 +130,48 @@ app.whenReady().then(async () => {
     assert.equal(await js('document.querySelector(\'input[aria-label="Trim Out"]\').value'), '2');
     assert.deepEqual(errors, []);
     console.log('PASS: autosaved project rehydrates on reload; no renderer errors');
+    if (process.env.ACU_TEST_PROJECTS === '1') {
+      const menuItem=async label=>{await click('.project-menu summary');await js(`Array.from(document.querySelectorAll('.project-menu button')).find(b=>b.textContent.startsWith(${JSON.stringify(label)})).click()`);await pause(100);};
+      const active=path.join(dir,'project.acup'),copy=path.join(dir,'copy.acup');
+      const count=saveCalls;await input('input[aria-label="Название проекта"]','Saved original');
+      await click('button[aria-label="Сохранить проект"]');await pause(250);
+      assert.equal(saveCalls,count);assert.equal(JSON.parse(await readFile(active,'utf8')).name,'Saved original');
+      savePath=copy;await menuItem('Сохранить как');await pause(250);
+      assert.equal(JSON.parse(await readFile(copy,'utf8')).name,'Saved original');
+      await input('input[aria-label="Название проекта"]','Saved copy');await click('button[aria-label="Сохранить проект"]');await pause(250);
+      assert.equal(JSON.parse(await readFile(active,'utf8')).name,'Saved original');assert.equal(JSON.parse(await readFile(copy,'utf8')).name,'Saved copy');
+      cancelSave=true;await menuItem('Сохранить как');cancelSave=false;assert.match(await js('document.querySelector(".project-file-state").textContent'),/copy.acup/);
+      await input('input[aria-label="Название проекта"]','Unsaved changes');messageResponse=2;const prompts=messageCalls;
+      await click('button[aria-label="Новый проект"]');assert.equal(messageCalls,prompts+1);assert.equal(await js('document.querySelector(\'input[aria-label="Название проекта"]\').value'),'Unsaved changes');
+      messageResponse=1;await click('button[aria-label="Новый проект"]');await waitFor('!document.querySelector("video.source-decoder")');
+      assert.equal(await js('document.querySelector(\'input[aria-label="Название проекта"]\').value'),'Untitled project');
+      openPath=path.join(dir,'broken.acup');await writeFile(openPath,'{');await click('button[aria-label="Открыть проект"]');await waitFor('document.querySelector(".toast.error")');
+      assert.equal(await js('document.querySelector(\'input[aria-label="Название проекта"]\').value'),'Untitled project');
+      openPath=copy;await click('button[aria-label="Открыть проект"]');await waitFor('document.querySelector("video.source-decoder")?.readyState>=2');
+      cancelOpen=true;await click('button[aria-label="Открыть проект"]');cancelOpen=false;
+      assert.match(await js('document.querySelector(".project-file-state").textContent'),/copy.acup/);
+      const beforeExport=await readFile(copy,'utf8'),portableDir=path.join(dir,'transfer');await mkdir(portableDir);
+      savePath=path.join(portableDir,'portable.acup');await menuItem('Экспорт проекта с медиа');await waitFor('document.querySelector(".toast")?.textContent.includes("Экспортирован .acup")');
+      assert.equal(await readFile(copy,'utf8'),beforeExport);assert.match(await js('document.querySelector(".project-file-state").textContent'),/copy.acup/);
+      const relocated=path.join(dir,'relocated');await rename(portableDir,relocated);openPath=path.join(relocated,'portable.acup');
+      await menuItem('Импорт проекта');await waitFor('document.querySelector("video.source-decoder")?.readyState>=2 && document.querySelector(".project-file-state").textContent===".acup *"');
+      assert.equal(await js('document.querySelector(".project-file-state").textContent'),'.acup *');
+      const relocatedTemplate=await readTemplate();assert.ok(relocatedTemplate.timeline.tracks[0].clips[0].source_path.startsWith(relocated));
+      assert.ok(relocatedTemplate.overlays[0].style.font_file.startsWith(relocated));
+      const mediaFile=editor.registry.resolve(new URL(await js('document.querySelector("video.source-decoder").src')).pathname.slice(1));assert.ok(mediaFile.startsWith(relocated));
+      await clickText('FFmpeg-кадр');await waitFor('document.querySelector(".reference-frame img")?.naturalWidth>0',40000);await click('button[title="Вернуться к интерактивному холсту"]');
+      savePath=path.join(dir,'imported.acup');await click('button[aria-label="Сохранить проект"]');await pause(250);
+      assert.equal(JSON.parse(await readFile(savePath,'utf8')).name,'Saved copy');assert.equal(await readFile(copy,'utf8'),beforeExport);
+      const legacy=path.join(dir,'legacy.acu.json');await copyFile(savePath,legacy);openPath=legacy;await click('button[aria-label="Открыть проект"]');await waitFor('document.querySelector(".project-file-state").textContent.includes("legacy.acu.json")');
+      await click('.project-menu summary');await writeFile(path.join(artifacts,'native-project-menu.png'),(await win.webContents.capturePage()).toPNG());await click('.project-menu summary');
+      const missing=path.join(dir,'missing.acup'),missingDocument=JSON.parse(await readFile(legacy,'utf8'));
+      missingDocument.sourcePath='unavailable.mp4';await writeFile(missing,JSON.stringify(missingDocument));openPath=missing;
+      await click('button[aria-label="Открыть проект"]');await waitFor('document.querySelector(".project-file-state").textContent.includes("missing.acup") && !document.querySelector("video.source-decoder")');
+      await click('button[aria-label="Сохранить проект"]');await pause(250);
+      const resavedMissing=JSON.parse(await readFile(missing,'utf8'));assert.equal(resavedMissing.sourcePath,'unavailable.mp4');assert.deepEqual(resavedMissing.trim,missingDocument.trim);
+      assert.deepEqual(errors,[]);
+      console.log('PASS: native .acup Save/reuse/Save As/cancel/unsaved guard, malformed open, portable export, moved media+fonts, import isolation, real FFmpeg and legacy open');
+    }
     if (process.env.ACU_TEST_MAIN_BCC === '1') {
       const keySource=path.join(dir,'main-key.mp4');
       await runProcess(process.env.FFMPEG_PATH??'ffmpeg',['-v','error','-f','lavfi','-i','color=c=0x00FF00:s=320x180:r=30:d=2,drawbox=x=100:y=20:w=120:h=140:color=0xF0BE50:t=fill','-c:v','libx264','-pix_fmt','yuv420p',keySource]);
@@ -152,7 +196,7 @@ app.whenReady().then(async () => {
       saved=await readTemplate();assert.equal(saved.main_clip_layout.background_removal.enabled,true);assert.equal(saved.timeline.tracks.find(t=>t.id==='track-main').clips[0].background_removal.enabled,false);
       await seek(.5);await waitFor(`(${canvasPixels}).background[1]>220`);await seek(1.5);await waitFor(`(${canvasPixels}).background[2]>220`);
       await click('button[aria-label="Отменить правку"]');await waitFor(`(${canvasPixels}).background[2]>220`);
-      savePath=path.join(dir,'main-key-project.json');await click('button[aria-label="Сохранить проект"]');await pause(800);
+      savePath=path.join(dir,'main-key-project.acup');await click('button[aria-label="Сохранить проект"]');await pause(800);
       await writeFile(path.join(artifacts,'main-bcc-preserved-colour.png'),(await win.webContents.capturePage()).toPNG());
       await win.loadFile(path.resolve('dist/index.html'));await waitFor('document.querySelectorAll(\'.nle-track[data-track-id="track-main"] .nle-clip\').length===2');
       assert.equal((await readTemplate()).main_clip_layout.background_removal.enabled,true);assert.deepEqual(errors,[]);
@@ -252,7 +296,7 @@ app.whenReady().then(async () => {
     console.log('PASS: window close flushes the newest draft before the autosave debounce');
     await writeFile(path.join(artifacts, 'result.json'), JSON.stringify({ passed: true, output: media, sourceUnchanged: true }, null, 2));
   } finally {
-    editor?.shutdown(); if (win && !win.isDestroyed()) win.destroy(); dialog.showOpenDialog = originalOpen; dialog.showSaveDialog = originalSave;
+    editor?.shutdown(); if (win && !win.isDestroyed()) win.destroy(); dialog.showOpenDialog = originalOpen; dialog.showSaveDialog = originalSave; dialog.showMessageBox = originalMessage;
     if (!process.env.ACU_EDITOR_TEST_DIR) await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 }).then(() => { clearTimeout(watchdog); app.exit(0); }).catch(error => { console.error(error); clearTimeout(watchdog); app.exit(1); });

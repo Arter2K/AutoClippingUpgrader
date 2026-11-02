@@ -14,6 +14,8 @@ import { aiAssetResponse } from './ai-assets';
 import { fontMetadata, systemFonts } from './fonts';
 import { renderVideo } from '../engine/renderer';
 import { renderPreview } from '../engine/preview';
+import { writeProjectFile, exportProjectWithMedia } from './project-files';
+import { PROJECT_EXTENSION, projectFilename, isProjectFile } from '../../shared/project';
 import type { registerPublishing } from '../services/publishing-hub';
 
 export async function registerEditor(owner: () => BrowserWindow | null, publishing: ReturnType<typeof registerPublishing>) {
@@ -23,6 +25,10 @@ export async function registerEditor(owner: () => BrowserWindow | null, publishi
   const aiRoot = app.isPackaged ? path.join(process.resourcesPath, 'ai-assets') : path.resolve('build/ai-assets');
   protocol.handle('acu-media', request => new URL(request.url).hostname === 'ai' ? aiAssetResponse(request, aiRoot) : registry.response(request));
   let projectDirectory = path.join(root, 'workspace');
+  let activeProjectPath: string | null = null;
+  let unavailableSourcePath: string | null = null;
+  const knownProjects = new Set<string>();
+  const projectFilters = [{ name: 'AutoClippingUpgrader Project', extensions: ['acup'] }, { name: 'Legacy project (.acu.json)', extensions: ['json'] }];
   let preview: AbortController | undefined;
   const sources = new Map<string, SourceMedia>();
   const loadSource = async (file: string): Promise<SourceMedia> => {
@@ -45,12 +51,12 @@ export async function registerEditor(owner: () => BrowserWindow | null, publishi
   };
   const resolveSource = (id: string) => { if (!sources.has(id)) throw new Error('Выберите исходный клип'); return registry.resolve(id); };
   const documentInput = z.object({ name: z.string().min(1).max(200), template: templateSchema, sourceId: z.string().uuid().nullable(),
-    trim: z.object({ inSec: z.number().nonnegative(), outSec: z.number().positive() }), settings: projectSchema.shape.settings });
+    trim: z.object({ inSec: z.number().nonnegative(), outSec: z.number().positive() }), settings: projectSchema.shape.settings, projectPath:z.string().nullable().optional() });
   const makeDocument = async (value: unknown) => {
     const input = documentInput.parse(value), hydrated = await repository.hydrate(input.template);
     if (input.sourceId) validateTrim(input.trim, sources.get(input.sourceId)?.media.durationSec);
     return projectSchema.parse({ format: 'AutoClippingUpgrader', version: 1, name: input.name, template: hydrated.template,
-      sourcePath: input.sourceId ? resolveSource(input.sourceId) : null, trim: input.trim, settings: input.settings });
+      sourcePath: input.sourceId ? resolveSource(input.sourceId) : unavailableSourcePath, trim: input.trim, settings: input.settings });
   };
   const restore = async (project: z.infer<typeof projectSchema>, directory?: string): Promise<EditorDocument> => {
     if (directory) projectDirectory = directory;
@@ -61,7 +67,7 @@ export async function registerEditor(owner: () => BrowserWindow | null, publishi
       catch { hydrated.warnings.push('Исходный клип недоступен. Выберите его заново.'); }
     }
     const validTrim = source && project.trim.outSec <= source.media.durationSec && project.trim.inSec < project.trim.outSec;
-    return { ...hydrated, source, name: project.name, settings: project.settings, trim: validTrim ? project.trim : { inSec: 0, outSec: source ? Math.min(30, source.media.durationSec) : 10 } };
+    return { ...hydrated, source, name: project.name, settings: project.settings, projectPath: activeProjectPath, trim: !source || validTrim ? project.trim : { inSec: 0, outSec: Math.min(30, source.media.durationSec) } };
   };
   const queue = new RenderQueue<RenderSubmission & { outputPath: string }>(async (input, update, signal) => {
     const plan = await renderVideo({ template: input.template, templateDir: root, inputPath: resolveSource(input.sourceId),
@@ -148,18 +154,53 @@ export async function registerEditor(owner: () => BrowserWindow | null, publishi
     if (result.canceled || !result.filePath) return false;
     await atomicJson(result.filePath, hydrated.template); return true;
   });
-  handle('project-save', async value => {
+  handle('project-save', async (value, rawSaveAs) => {
     const document = await makeDocument(value);
-    const result = await dialog.showSaveDialog(window(), { defaultPath: `${document.name.replace(/[^\p{L}\p{N} _-]/gu, '')}.acu.json`, filters: [{ name: 'AutoClipping project', extensions: ['json'] }] });
-    if (result.canceled || !result.filePath) return false;
-    await atomicJson(result.filePath, document); projectDirectory = path.dirname(result.filePath); return true;
+    const saveAs = z.boolean().optional().parse(rawSaveAs) ?? false;
+    let file = !saveAs ? activeProjectPath : null;
+    if (!file) {
+      const result = await dialog.showSaveDialog(window(), { defaultPath: activeProjectPath ? path.join(path.dirname(activeProjectPath),projectFilename(document.name)) : projectFilename(document.name), filters: [projectFilters[0]!] });
+      if (result.canceled || !result.filePath) return null;
+      file = result.filePath.toLowerCase().endsWith(PROJECT_EXTENSION) ? result.filePath : result.filePath + PROJECT_EXTENSION;
+    }
+    await writeProjectFile(file,document); activeProjectPath = path.resolve(file);knownProjects.add(activeProjectPath);projectDirectory = path.dirname(file); return activeProjectPath;
   });
-  handle('project-open', async () => {
-    const result = await dialog.showOpenDialog(window(), { properties: ['openFile'], filters: [{ name: 'AutoClipping project', extensions: ['json'] }] });
+  const openProjectFile = async (file:string, imported=false) => {
+    const project = await repository.readProject(file), previousDirectory=projectDirectory;
+    try {
+      const document=await restore(project,path.dirname(file));activeProjectPath=imported?null:path.resolve(file);
+      unavailableSourcePath=document.source?null:project.sourcePath;
+      if(activeProjectPath)knownProjects.add(activeProjectPath);if(imported)projectDirectory=path.join(root,'workspace');
+      return {...document,projectPath:activeProjectPath};
+    }catch(error){projectDirectory=previousDirectory;throw error;}
+  };
+  const chooseProject = async (imported=false) => {
+    const result = await dialog.showOpenDialog(window(), { properties: ['openFile'], filters: projectFilters });
     if (result.canceled || !result.filePaths[0]) return null;
-    return restore(await repository.readProject(result.filePaths[0]), path.dirname(result.filePaths[0]));
+    return openProjectFile(result.filePaths[0],imported);
+  };
+  handle('project-open', async () => chooseProject());
+  handle('project-import', async () => chooseProject(true));
+  handle('project-drop', async value => {
+    const file=z.string().min(1).max(32768).parse(value);if(!isProjectFile(file))throw new Error('Перетащите проект .acup или .acu.json');return openProjectFile(file);
   });
-  handle('draft-save', async value => repository.saveDraft(await makeDocument(value)));
+  handle('project-reset', async () => { activeProjectPath = null; unavailableSourcePath = null; projectDirectory = path.join(root,'workspace'); });
+  handle('project-confirm-switch',async value=>{
+    const name=z.string().max(200).parse(value);
+    const result=await dialog.showMessageBox(window(),{type:'question',title:'Несохранённый проект',message:`Сохранить изменения в «${name.trim()||'Без названия'}»?`,buttons:['Сохранить','Не сохранять','Отмена'],defaultId:0,cancelId:2,noLink:true});
+    return result.response===0?'save':result.response===1?'discard':'cancel';
+  });
+  handle('project-export', async value => {
+    const document=await makeDocument(value),result=await dialog.showSaveDialog(window(),{defaultPath:projectFilename(`${document.name} portable`),filters:[projectFilters[0]!]});
+    if(result.canceled||!result.filePath)return null;
+    const file=result.filePath.toLowerCase().endsWith(PROJECT_EXTENSION)?result.filePath:result.filePath+PROJECT_EXTENSION;
+    return exportProjectWithMedia(file,document);
+  });
+  handle('draft-save', async value => {
+    const input=documentInput.parse(value),file=input.projectPath===undefined?activeProjectPath:input.projectPath;
+    if(file&&!knownProjects.has(path.resolve(file)))throw new Error('Путь проекта не был выбран в редакторе');
+    await repository.saveDraft(await makeDocument(input),file);
+  });
   handle('close-ready', async () => { owner()?.destroy(); });
   handle('bootstrap', async () => {
     let defaultFont = null;
@@ -168,7 +209,12 @@ export async function registerEditor(owner: () => BrowserWindow | null, publishi
       try { await access(font); defaultFont = { path: font, name: path.basename(font), url: registry.register(font).url, kind: 'font' as const }; break; } catch { /* Try the next installed font. */ }
     }
     const draft = await repository.draft();
-    return { library: repository.list(), draft: draft ? await restore(draft) : null, defaultFont, jobs: queue.list() };
+    activeProjectPath = draft?.projectPath && (isProjectFile(draft.projectPath) || draft.projectPath.toLowerCase().endsWith('.json')) ? path.resolve(draft.projectPath) : null;
+    if(activeProjectPath)knownProjects.add(activeProjectPath);
+    const restored=draft?await restore(draft,activeProjectPath?path.dirname(activeProjectPath):undefined):null;
+    unavailableSourcePath=restored?.source?null:draft?.sourcePath??null;
+    if(restored)restored.recoveredDraft=true;
+    return { library: repository.list(), draft: restored, defaultFont, jobs: queue.list() };
   });
   handle('preview-cancel', async () => { preview?.abort(); });
   handle('preview', async (source, rawTemplate, rawTrim, rawTime) => {

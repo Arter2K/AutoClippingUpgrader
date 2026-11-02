@@ -2,11 +2,13 @@
 
 Electron + React + TypeScript приложение для вертикального монтажа: многодорожечный таймлайн, нарезка и тримминг сегментов, отделение аудио, микшер, JSON-шаблоны, BCC-style Chroma Key Studio, локальное AI-удаление фона и FFmpeg-рендер. Готовое видео передаётся в панель публикации TikTok / Google Drive; Drive при выбранной опции загружается после рендера.
 
-**Текущая версия: 0.6.1.** Локальная Windows-сборка создаёт `release/AutoClippingUpgrader-0.6.1-Setup-x64.exe` и `release/AutoClippingUpgrader-0.6.1-Portable-x64.exe` со встроенными FFmpeg/FFprobe и AI-моделью. Готовые EXE, модели, `node_modules` и тестовые артефакты не хранятся в Git. [Инструкция EXE и повторная сборка](docs/windows-build.md).
+**Текущая версия: 0.7.0.** Локальная Windows-сборка создаёт `release/AutoClippingUpgrader-0.7.0-Setup-x64.exe` и `release/AutoClippingUpgrader-0.7.0-Portable-x64.exe` со встроенными FFmpeg/FFprobe и AI-моделью. Готовые EXE, модели, `node_modules` и тестовые артефакты не хранятся в Git. [Инструкция EXE и повторная сборка](docs/windows-build.md).
 
 **Запуск из исходников:** после установки зависимостей и сборки откройте `Start.cmd` либо выполните `.\scripts\run.ps1 preview`. Для разработки используйте `npm run dev`. [Руководство редактора](docs/editor.md) содержит описание функций, горячих клавиш и проверки; артефакты локальных проверок создаются в `out/`.
 
 **Монтаж и эффекты:** [многодорожечный таймлайн](docs/multitrack-timeline.md), [BCC-style Chroma Key Studio](docs/bcc-chroma-key.md), [текст, анимации и AI matting](docs/layer-effects.md).
+
+**Проекты `.acup`:** сохранение и «Сохранить как», открытие старых `.acu.json`, импорт самостоятельной копии и [экспорт с медиа для переноса](docs/projects.md). Экспорт создаёт `.acup` и соседнюю папку ресурсов; переносите их вместе.
 
 **Настройка шага 2:** [docs/publishing.md](docs/publishing.md) и [.env.example](.env.example). Для входа нужны реквизиты ваших OAuth-приложений. Реальные облачные аккаунты при разработке не использовались; протоколы проверены управляемыми сетевыми тестами, native Electron и настоящими файловыми потоками.
 

@@ -10,13 +10,16 @@ export interface SystemFont { path: string; name: string; family: string }
 export interface HydratedTemplate { template: Template; assets: Record<string, string>; warnings: string[] }
 export interface LibraryEntry { id: string; name: string; width: number; height: number; builtIn: boolean; layers: number }
 export interface EditorSettings { autoUpload: boolean; driveFolderId: string; fallback: boolean }
-export interface EditorDocument extends HydratedTemplate { source: SourceMedia | null; trim: Trim; name: string; settings?: EditorSettings }
+export interface EditorDocument extends HydratedTemplate { source: SourceMedia | null; trim: Trim; name: string; settings?: EditorSettings; projectPath?: string | null; recoveredDraft?: boolean }
+export interface ProjectInput { name: string; template: Template; sourceId: string | null; trim: Trim; settings?: EditorSettings; projectPath?: string | null }
+export interface ProjectExport { path: string; mediaCount: number; bytes: number }
 export const projectSchema = z.object({
   format: z.literal('AutoClippingUpgrader'), version: z.literal(1), name: z.string().min(1).max(200),
-  template: templateSchema, sourcePath: z.string().nullable(),
+  template: templateSchema, sourcePath: z.string().min(1).max(32768).refine(v => !/[\x00-\x1f]/.test(v), 'Invalid source path').nullable(),
   trim: z.object({ inSec: z.number().nonnegative(), outSec: z.number().positive() }),
   settings: z.object({ autoUpload: z.boolean(), driveFolderId: z.string(), fallback: z.boolean() }).optional(),
-});
+}).refine(p => p.trim.outSec > p.trim.inSec, 'Project trim requires inSec < outSec');
+export const draftSchema = projectSchema.safeExtend({ projectPath: z.string().nullable().optional() });
 export type ProjectFile = z.infer<typeof projectSchema>;
 export interface RenderSubmission {
   sourceId: string; template: Template; trim: Trim; name: string;
@@ -43,9 +46,14 @@ export interface EditorBridge {
   saveTemplate(template: Template): Promise<LibraryEntry[]>;
   importTemplate(): Promise<HydratedTemplate | null>;
   exportTemplate(template: Template): Promise<boolean>;
-  saveProject(document: { name: string; template: Template; sourceId: string | null; trim: Trim; settings?: EditorSettings }): Promise<boolean>;
+  saveProject(document: ProjectInput, saveAs?: boolean): Promise<string | null>;
   openProject(): Promise<EditorDocument | null>;
-  saveDraft(document: { name: string; template: Template; sourceId: string | null; trim: Trim; settings?: EditorSettings }): Promise<void>;
+  importProject(): Promise<EditorDocument | null>;
+  exportProject(document: ProjectInput): Promise<ProjectExport | null>;
+  dropProject(file: File): Promise<EditorDocument>;
+  resetProject(): Promise<void>;
+  confirmProjectSwitch(name: string): Promise<'save' | 'discard' | 'cancel'>;
+  saveDraft(document: ProjectInput): Promise<void>;
   onPrepareClose(callback: () => void): () => void;
   confirmClose(): Promise<void>;
   preview(sourceId: string, template: Template, trim: Trim, timeSec: number): Promise<string>;

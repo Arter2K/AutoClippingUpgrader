@@ -120,3 +120,9 @@ Node-тесты проверяют схему, geometry, Zustand history, media 
 ## BCC-style keying (0.6)
 
 shared/bcc-chroma.ts задаёт Zod-схему и общую математику. renderer/lib/BccChromaKeyShader.ts выполняет многопроходный GLSL; BccLayerRenderer захватывает нижний композит в координатах слоя. Его используют обычный PreviewCanvas и TimelinePreview. BccBackgroundPanel содержит четыре секции и диагностические view modes. engine/bcc-chroma.ts компилирует primary mask, morphology, levels/gamma, despill, alpha merge и canvas-space light wrap; graph.ts подключает его к каждому BCC-слою/сегменту. Ни IPC-контракт, ни права renderer не расширены. Подробности и допуски: [bcc-chroma-key.md](bcc-chroma-key.md).
+
+## Проекты .acup (0.7)
+
+`shared/project.ts` задаёт расширение и безопасное имя файла; `shared/editor.ts` содержит совместимую схему проекта версии 1 и отдельную схему локального черновика с путём текущего файла. `editor/project-files.ts` перечисляет все ссылки, разрешает относительные пути и экспортирует медиа через staging-каталог: сначала копии, затем атомарная публикация манифеста. `atomic-json.ts` используется и библиотекой, и проектами.
+
+Main хранит активный путь независимо от renderer, разрешает повторное сохранение только выбранного/открытого проекта и проверяет sender каждого IPC. `features/projects/project-actions.ts` управляет Save/Save As, dirty revision/settings, отменой и заменой композиции; `ProjectMenu.tsx` даёт меню «Файл». Экспорт не меняет активный проект, импорт создаёт несохранённую копию. Автосохранение приостанавливается во время смены проекта и возобновляется для итогового состояния. Подробнее: [projects.md](projects.md).

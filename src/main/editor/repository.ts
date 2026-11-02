@@ -1,20 +1,17 @@
 import path from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { templateSchema, type Template } from '../../shared/template';
-import { projectSchema, type HydratedTemplate, type LibraryEntry, type ProjectFile } from '../../shared/editor';
+import { draftSchema, type HydratedTemplate, type LibraryEntry, type ProjectFile } from '../../shared/editor';
+import { atomicJson } from './atomic-json';
+import { readProjectFile } from './project-files';
+export { atomicJson } from './atomic-json';
 import { newTemplate } from '../../shared/defaults';
 import { fontMetadata } from './fonts';
 import { isRichText } from '../../shared/layer-effects';
 import type { MediaRegistry } from './media-registry';
 import { segmentNeedsMedia } from '../../shared/timeline';
 
-export async function atomicJson(file: string, value: unknown) {
-  await mkdir(path.dirname(file), { recursive: true });
-  const temp = `${file}.${randomUUID()}.tmp`;
-  try { await writeFile(temp, JSON.stringify(value, null, 2), { flag: 'wx', encoding: 'utf8' }); await rename(temp, file); }
-  finally { await rm(temp, { force: true }); }
-}
 export class EditorRepository {
   private entries = new Map<string, { template: Template; builtIn: boolean }>();
   private writes: Promise<unknown> = Promise.resolve();
@@ -85,14 +82,14 @@ export class EditorRepository {
     return this.list();
   }
   async readTemplate(file: string) { return this.hydrate(JSON.parse(await readFile(file, 'utf8')), path.dirname(file)); }
-  async readProject(file: string): Promise<ProjectFile> { return projectSchema.parse(JSON.parse(await readFile(file, 'utf8'))); }
-  saveDraft(document: ProjectFile) {
-    const value = structuredClone(document);
+  async readProject(file: string): Promise<ProjectFile> { return readProjectFile(file); }
+  saveDraft(document: ProjectFile, projectPath?: string | null) {
+    const value = { ...structuredClone(document), projectPath: projectPath ?? null };
     const task = this.writes.then(() => atomicJson(path.join(this.root, 'draft.json'), value));
     this.writes = task.catch(() => {}); return task;
   }
-  async draft(): Promise<ProjectFile | null> {
-    try { return await this.readProject(path.join(this.root, 'draft.json')); }
+  async draft(): Promise<(ProjectFile & { projectPath?: string | null }) | null> {
+    try { return draftSchema.parse(JSON.parse(await readFile(path.join(this.root,'draft.json'),'utf8'))); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; return null; }
   }
 }

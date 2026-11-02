@@ -61,6 +61,9 @@ async function inspectExecutable(executable, label, artifacts, workerAsset, vers
     };
     await waitFor('document.querySelectorAll(".template-card").length === 3 && !document.querySelector(".media-loading")');
     assert.equal(await cdp.evaluate('typeof window.require'), 'undefined');
+    assert.equal(await cdp.evaluate('Array.from(document.querySelectorAll(".project-menu button")).length'),6);
+    assert.equal(await cdp.evaluate('typeof window.desktop.editor.importProject'), 'function');
+    assert.equal(await cdp.evaluate('typeof window.desktop.editor.exportProject'), 'function');
     await cdp.evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('Открыть тестовый клип')).click()`);
     await waitFor('document.querySelectorAll(".nle-clip").length===1 && document.querySelector("video.source-decoder")?.readyState>=2', 60000);
     assert.equal(await cdp.evaluate('document.querySelector(".version-pill").textContent'), `v${version}`);
@@ -107,7 +110,8 @@ async function inspectExecutable(executable, label, artifacts, workerAsset, vers
     const audio = draft.template.timeline.tracks.find(track => track.type === 'audio');
     assert.equal(audio.clips[0].volume, .4);
     assert.equal(draft.template.timeline.total_duration_sec, 8);
-    console.log(`PASS: ${label} EXE v${version}, main BCC/WebGL matte, multitrack split/gain/detach/waveform/draft, bundled FFmpeg, reference frame, offline AI, clean close`);
+    assert.equal(draft.projectPath,null);
+    console.log(`PASS: ${label} EXE v${version}, .acup menu/bridge/draft, main BCC/WebGL matte, multitrack split/gain/detach/waveform/draft, bundled FFmpeg, reference frame, offline AI, clean close`);
     return { label, passed: true, executable: path.basename(executable) };
   } finally {
     socket?.close(); if (child && child.exitCode === null) { child.kill(); await pause(800); }
