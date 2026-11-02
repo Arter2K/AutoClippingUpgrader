@@ -1,0 +1,57 @@
+const { app, BrowserWindow } = require('electron');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { mkdir, writeFile } = require('node:fs/promises');
+const { createRequire } = require('node:module');
+require('tsx/cjs');
+const { newBccChroma } = require('../../src/shared/bcc-chroma.ts');
+const esbuild = createRequire(require.resolve('vite'))('esbuild');
+app.commandLine.appendSwitch('use-angle','swiftshader');
+app.commandLine.appendSwitch('enable-unsafe-swiftshader');
+const timer=setTimeout(()=>{console.error('BCC shader smoke timed out');app.exit(1);},60000);
+app.whenReady().then(async()=>{
+  let win;
+  try {
+    const bundle=await esbuild.build({entryPoints:[path.resolve('src/renderer/lib/BccChromaKeyShader.ts')],bundle:true,format:'iife',globalName:'BccShaderTest',write:false,platform:'browser'});
+    win=new BrowserWindow({show:false,width:640,height:480,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});
+    await win.loadURL('data:text/html,<html><body style="background:%23202030;color:white">BCC WebGL2 QA</body></html>');
+    await win.webContents.executeJavaScript(bundle.outputFiles[0].text);
+    const result=await win.webContents.executeJavaScript(`(()=>{
+      const config=${JSON.stringify(newBccChroma())};Object.assign(config.matte_cleanup,{matte_choke_px:0,matte_softness_px:0,black_clip:0,white_clip:1});config.light_wrap.enabled=false;
+      const input=document.createElement('canvas'),bg=document.createElement('canvas');input.width=bg.width=64;input.height=bg.height=64;
+      const ctx=input.getContext('2d'),b=bg.getContext('2d');b.fillStyle='blue';b.fillRect(0,0,64,64);
+      const pixels=ctx.createImageData(64,64);for(let y=0;y<64;y++)for(let x=0;x<64;x++)pixels.data.set(x<16?[0,255,0,255]:x<32?[255,0,0,128]:x<48?[255,0,0,0]:[255,255,255,255],(y*64+x)*4);ctx.putImageData(pixels,0,0);
+      const shader=new BccShaderTest.BccChromaKeyShader(),output=document.createElement('canvas');output.width=64;output.height=64;const o=output.getContext('2d');
+      const sample=(x,y=32)=>Array.from(o.getImageData(x,y,1,1).data);
+      const draw=()=>{o.clearRect(0,0,64,64);o.drawImage(shader.render(input,bg,config,64,64),0,0);};
+      draw();const final=[sample(8),sample(24),sample(40),sample(56)];
+      config.view_mode='alpha_matte';draw();const matte=[sample(8),sample(24),sample(40),sample(56)];
+      config.view_mode='source_only';draw();const source=sample(8);
+      config.view_mode='alpha_matte';ctx.fillStyle='#00FF00';ctx.fillRect(0,0,64,64);ctx.fillStyle='red';ctx.fillRect(16,16,32,32);
+      config.matte_cleanup.matte_choke_px=-1.5;draw();const eroded=[sample(16),sample(17),sample(20)];
+      config.matte_cleanup.matte_choke_px=1.5;draw();const dilated=[sample(14),sample(15)];
+      config.matte_cleanup.matte_choke_px=0;config.matte_cleanup.matte_softness_px=1.5;draw();const softened=sample(15);
+      config.matte_cleanup.matte_gamma=2;draw();const gamma=sample(15);
+      config.view_mode='final_composite';config.matte_cleanup.matte_gamma=1;config.matte_cleanup.matte_softness_px=0;
+      config.light_wrap.enabled=true;config.light_wrap.width_px=3;config.light_wrap.intensity=1;draw();const blueWrap=sample(18);
+      b.fillStyle='white';b.fillRect(0,0,64,64);draw();const whiteWrap=sample(18);
+      config.view_mode='alpha_matte';Object.assign(config.primary_key,{hue_weight:1,saturation_weight:1,luma_weight:0});draw();const nativeKey=[sample(8),sample(32)];
+      config.primary_key.key_color='#000000';ctx.fillStyle='black';ctx.fillRect(0,0,64,64);ctx.fillStyle='white';ctx.fillRect(16,16,32,32);draw();const neutralKey=[sample(8),sample(32)];
+      const gl=shader.canvas.getContext('webgl2');const error=gl.getError();
+      const time=performance.now();for(let i=0;i<10;i++)shader.render(input,bg,config,64,64);gl.finish();const benchmarkMs=(performance.now()-time)/10;
+      shader.canvas.style.width=output.style.width='256px';shader.canvas.style.height=output.style.height='256px';document.body.append(output,shader.canvas);
+      const screenshot=output.toDataURL();shader.dispose();return {final,matte,source,eroded,dilated,softened,gamma,blueWrap,whiteWrap,nativeKey,neutralKey,error,benchmarkMs,screenshot};
+    })()`);
+    assert.equal(result.error,0,'WebGL must not report feedback/invalid operations');
+    assert.equal(result.final[0][3],0);assert.ok(Math.abs(result.final[1][3]-128)<3);assert.equal(result.final[2][3],0);assert.equal(result.final[3][3],255);
+    assert.deepEqual(result.matte[0],[0,0,0,255]);assert.ok(Math.abs(result.matte[1][0]-128)<3);assert.deepEqual(result.matte[3],[255,255,255,255]);
+    assert.deepEqual(result.source,[0,255,0,255]);assert.ok(result.eroded[0][0]<3);assert.ok(Math.abs(result.eroded[1][0]-128)<3);assert.equal(result.eroded[2][0],255);
+    assert.ok(Math.abs(result.dilated[0][0]-128)<3);assert.equal(result.dilated[1][0],255);assert.ok(result.softened[0]>0&&result.softened[0]<255);assert.ok(result.gamma[0]>result.softened[0]);
+    assert.ok(result.blueWrap[2]>20);assert.ok(result.whiteWrap[1]>result.blueWrap[1]+20);
+    assert.equal(result.nativeKey[0][0],0);assert.equal(result.nativeKey[1][0],255);assert.equal(result.neutralKey[0][0],0);assert.equal(result.neutralKey[1][0],255);
+    const artifacts=path.resolve('out/bcc-qa');await mkdir(artifacts,{recursive:true});await writeFile(path.join(artifacts,'webgl-matte.png'),Buffer.from(result.screenshot.split(',')[1],'base64'));
+    delete result.screenshot;await writeFile(path.join(artifacts,'webgl-results.json'),JSON.stringify(result,null,2));
+    console.log('PASS: actual WebGL2 shader, source alpha, matte/source views, fractional choke, softness/gamma, lower-background light wrap, clean GL state');
+    console.log('Software WebGL benchmark (64x64, not a hardware 60 FPS claim): '+result.benchmarkMs.toFixed(2)+' ms/frame');
+  }finally{if(win&&!win.isDestroyed())win.destroy();}
+}).then(()=>{clearTimeout(timer);app.exit(0);}).catch(error=>{console.error(error);clearTimeout(timer);app.exit(1);});
